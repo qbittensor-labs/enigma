@@ -17,6 +17,7 @@
 
 import bittensor as bt
 import os
+import shutil
 import subprocess
 import time
 from typing import Optional, Tuple
@@ -235,7 +236,6 @@ def run_solution_management(
                 solution_id=execution.solution_id,
                 solution_status=SolutionStatus.FAILED.value,
             )
-            db_conn.db_query.mark_solution_cleaned(execution.solution_id)
 
         log_data_key: str | None = None
         if platform_client:
@@ -284,6 +284,8 @@ def run_solution_management(
     finally:
         if not did_start_solution:
             clean_up_failed_solution(image_name=image_name, container_id=container_id, folder_name=absolute_path_to_host_folder)
+            if did_insert_solution and execution is not None:
+                db_conn.db_query.mark_solution_cleaned(execution.solution_id)
 
     return image_name, container_id, folder_path
 
@@ -310,15 +312,23 @@ def clean_up_failed_solution(image_name: str | None, container_id: str | None, f
             bt.logging.warning(f"⚠️ Failed to remove image {image_name}")
 
     if folder_name is not None:
-        remove_folder_result = subprocess.run(["rm", "-rf", folder_name], check=False, capture_output=True, text=True)
-        if remove_folder_result.returncode == 0:
+        bt.logging.info(f"🗑️ Removing solution folder {folder_name}")
+        remove_success = False
+        try:
+            remove_folder_result = subprocess.run(["rm", "-rf", folder_name], check=False, capture_output=True, text=True)
+            if remove_folder_result.returncode == 0 and not os.path.exists(folder_name):
+                remove_success = True
+            else:
+                shutil.rmtree(folder_name, ignore_errors=True)
+                if not os.path.exists(folder_name):
+                    remove_success = True
+        except Exception as e:
+            bt.logging.warning(f"⚠️ Exception during folder removal for {folder_name}: {e}")
+        if remove_success:
             bt.logging.info(f"🗑️ Removed folder {folder_name}")
             cleaned += 1
         else:
-            bt.logging.warning(
-                f"⚠️ Failed to remove folder {folder_name}: "
-                f"{(remove_folder_result.stderr or remove_folder_result.stdout).strip()}"
-            )
+            bt.logging.warning(f"⚠️ Failed to remove folder {folder_name}")
 
     if total > 0:
         bt.logging.info(f"🧹 Failed solution cleanup complete: {cleaned}/{total} items removed")

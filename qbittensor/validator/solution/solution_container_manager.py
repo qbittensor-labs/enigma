@@ -266,6 +266,7 @@ class SolutionContainerManager:
                 # still attempt container/image cleanup below if names present
 
             try:
+                container_removed = False
                 if container_name:
                     if not self._container_has_validator_label(container_name):
                         bt.logging.warning(
@@ -273,30 +274,83 @@ class SolutionContainerManager:
                         )
                         continue
                     self._docker.stop(container_name)
-                    self._docker.rm(container_name, volumes=True)
+                    if self._docker.rm(container_name, volumes=True):
+                        container_removed = True
+                        bt.logging.info(f"✅ Removed container {container_name} for solution {info.id}")
+                    else:
+                        bt.logging.warning(f"⚠️ Failed to remove container {container_name} for solution {info.id}")
 
+                image_removed = False
                 if image_id:
                     if not self._image_ref_owned_by_validator(image_id):
                         bt.logging.warning(
                             f"⚠️ Refusing to remove image {image_id}; name does not match validator label prefix"
                         )
                     else:
-                        self._docker.rmi(image_id, force=True)
+                        if self._docker.rmi(image_id, force=True):
+                            image_removed = True
+                            bt.logging.info(f"✅ Removed image {image_id} for solution {info.id}")
+                        else:
+                            bt.logging.warning(f"⚠️ Failed to remove image {image_id} for solution {info.id}")
 
-                bt.logging.info(f"🗑️ Removing solution folder {location}")
-                rmf_res = subprocess.run(["rm", "-rf", location], check=False, capture_output=True, text=True)
-                if rmf_res.returncode == 0:
-                    bt.logging.info(f"🗑️ Removed solution folder {location}")
+                fs_removed = self._remove_workspace(location)
+                if container_removed or image_removed or fs_removed:
                     cleaned += 1
                     self.database_connection.db_query.mark_solution_cleaned(info.id)
-                else:
-                    bt.logging.warning(f"⚠️ Failed to remove folder {location}")
 
             except Exception as e:
                 bt.logging.error(f"❌ Failed to clean up solution at {location}: {e}")
 
         if solutions:
             bt.logging.info(f"🧹 Cleaned up {cleaned}/{len(solutions)} solution locations")
+
+    def _remove_workspace(self, path: str | None) -> bool:
+        """Remove the per-solution host workspace directory at the time we decide
+        the solution's work is complete.
+
+        This is called from terminal paths (finalize, normal clean, etc.) so the
+        directory is cleaned *when it is supposed to be cleaned* (on overdue
+        termination, natural exit post-validation, prune reconciliation, stale
+        recovery, early failure, etc.), rather than relying on later recovery or
+        a background sweeper.
+
+        Uses aggressive rm -rf + shutil fallback + post-check for robustness
+        even on large trees (full cado installs, many wheels, etc.).
+        Returns True if the path is gone afterwards (or never existed).
+        """
+        if not path:
+            bt.logging.debug("No workspace path to remove")
+            return True
+        if not os.path.exists(path):
+            bt.logging.info(f"🗑️ Workspace already gone: {path}")
+            return True
+
+        bt.logging.info(f"🗑️ Removing solution workspace folder {path}")
+        try:
+            # Primary (matches existing style)
+            rm_res = subprocess.run(
+                ["rm", "-rf", path], check=False, capture_output=True, text=True
+            )
+            if rm_res.returncode == 0 and not os.path.exists(path):
+                bt.logging.info(f"✅ Successfully removed solution workspace folder {path}")
+                return True
+
+            # Robust fallback
+            shutil.rmtree(path, ignore_errors=True)
+            if not os.path.exists(path):
+                bt.logging.info(f"✅ Successfully removed solution workspace folder {path} (fallback)")
+                return True
+
+            bt.logging.error(f"❌ Failed to remove solution workspace folder {path} (still exists after attempts)")
+            try:
+                remaining = os.listdir(path)[:5]
+                bt.logging.error(f"    Sample remaining top-level entries: {remaining}")
+            except Exception:
+                pass
+            return False
+        except Exception as e:
+            bt.logging.error(f"❌ Failed to remove solution workspace folder {path}: {e}")
+            return False
 
     def _find_completed_solutions(self) -> List[str]:
         """Find containers that have completed their run and are ready for output validation"""
@@ -697,6 +751,12 @@ class SolutionContainerManager:
             except Exception as e:
                 bt.logging.warning(f"Failed to extract output during terminal finalize for {getattr(sol, 'id', '?')}: {e}")
 
+        path = getattr(sol, "absolute_path_to_solution", None)
+        if path:
+            ws_cleaned = self._remove_workspace(path)
+            if ws_cleaned:
+                bt.logging.info(f"✅ Workspace folder cleaned as part of terminal finalize for solution {getattr(sol, 'id', '?')}")
+
         try:
             self.database_connection.db_query.update_solution_status_by_id(sol.id, status)
             self.database_connection.db_query.mark_solution_cleaned(sol.id)
@@ -789,7 +849,11 @@ class SolutionContainerManager:
                     f"⚠️ Skipping image removal for overdue container {cid}; "
                     f"no image reference matched validator-owned naming (config={config_image!r}, db={db_image!r})"
                 )
-            self._docker.stop(cid)
+            stop_ok = self._docker.stop(cid)
+            if stop_ok:
+                bt.logging.info(f"✅ Stopped overdue container {cid}")
+            else:
+                bt.logging.warning(f"⚠️ Stop may have failed for overdue container {cid}")
 
             if sol and getattr(sol, "absolute_path_to_solution", None):
                 try:
@@ -800,20 +864,26 @@ class SolutionContainerManager:
 
             if self._docker.rm(cid, volumes=True):
                 terminated += 1
+                bt.logging.info(f"✅ Removed overdue container {cid}")
 
-                # Delegate to central helper — guarantees local DB + platform report are done together
+                # Delegate to central helper — guarantees local DB + platform report + workspace folder removal
                 self._finalize_solution_terminal(
                     sol,
                     status=SolutionStatus.FAILED.value,
                     reason=f"Validator terminated container as overdue (exceeded max_solution_runtime_seconds={getattr(sol, 'max_solution_runtime_seconds', '?')})",
                     attempt_extraction=False,  # extraction was already attempted above
                 )
+            else:
+                bt.logging.warning(f"⚠️ Failed to remove overdue container {cid}")
 
             if image_to_remove:
                 if self._docker.rmi(image_to_remove, force=True):
                     images_removed += 1
+                    bt.logging.info(f"✅ Removed overdue image {image_to_remove}")
+                else:
+                    bt.logging.warning(f"⚠️ Failed to remove overdue image {image_to_remove}")
 
-        bt.logging.info(f"🛑 Overdue termination complete: {terminated} containers terminated, {images_removed} images removed")
+        bt.logging.info(f"🛑 Overdue termination complete: {terminated} containers terminated + removed, {images_removed} images removed. Workspace folders cleaned via finalize.")
 
     def _reconcile_stale_db_rows(self) -> None:
         """Safety net / periodic scan for DB rows that are still RUNNING (or PENDING) but whose
@@ -907,6 +977,7 @@ class SolutionContainerManager:
 
                 if self._docker.rm(cid, volumes=True):
                     pruned_containers += 1
+                    bt.logging.info(f"✅ Removed pruned container {cid}")
 
                     try:
                         stable = self._get_stable_keys_from_container(cid)
@@ -914,6 +985,7 @@ class SolutionContainerManager:
                             sol = self.database_connection.db_query.get_challenge_solution_by_id(stable["solution_id"])
                             if sol and sol.solution_status in (SolutionStatus.RUNNING.value, SolutionStatus.PENDING.value):
                                 # Delegate to central helper (adds platform report that was previously missing)
+                                # This will also trigger workspace folder removal via _finalize
                                 self._finalize_solution_terminal(
                                     sol,
                                     status=SolutionStatus.FAILED.value,
@@ -922,6 +994,8 @@ class SolutionContainerManager:
                                 )
                     except Exception as e:
                         bt.logging.debug(f"Prune reconciliation note for {cid}: {e}")
+                else:
+                    bt.logging.warning(f"⚠️ Failed to remove pruned container {cid}")
 
                 if not config_image or not self._image_ref_owned_by_validator(config_image):
                     bt.logging.warning(
@@ -931,8 +1005,11 @@ class SolutionContainerManager:
                     continue
                 if self._docker.rmi(config_image, force=True):
                     pruned_images += 1
+                    bt.logging.info(f"✅ Removed pruned image {config_image}")
+                else:
+                    bt.logging.warning(f"⚠️ Failed to remove pruned image {config_image}")
 
-            bt.logging.info(f"🗑️ Prune complete: {pruned_containers} containers, {pruned_images} images removed")
+            bt.logging.info(f"🗑️ Prune complete: {pruned_containers} containers removed, {pruned_images} images removed (workspace cleanup via finalize where applicable)")
         except Exception as e:
             bt.logging.error(f"❌ Failed to prune containers/images: {e}")
 
@@ -1008,13 +1085,17 @@ class SolutionContainerManager:
                 )
                 return
 
-            self._docker.stop(container_name)
-            self._docker.rm(container_name, volumes=True)
+            if self._docker.stop(container_name):
+                bt.logging.info(f"✅ Stopped orphaned container {container_name}")
+            self._docker.rm(container_name, volumes=True)  # DockerOps logs success/failure
 
             # Clean up the image directly via inspect (no DB needed for orphans).
             image_ref = self._inspect_container_config_image(container_name)
             if image_ref and self._image_ref_owned_by_validator(image_ref):
-                self._docker.rmi(image_ref, force=True)
+                if self._docker.rmi(image_ref, force=True):
+                    bt.logging.info(f"✅ Removed orphaned image {image_ref}")
+                else:
+                    bt.logging.warning(f"⚠️ Failed to remove orphaned image {image_ref}")
             elif image_ref:
                 bt.logging.warning(
                     f"⚠️ Refusing to remove orphan image {image_ref}; name does not match validator label prefix"
@@ -1099,12 +1180,11 @@ class SolutionContainerManager:
                     if path and os.path.exists(path):
                         # This can happen for legacy "pending:path:..." directories created
                         # during old recovery/startup bugs. Clean it up.
-                        try:
-                            shutil.rmtree(path, ignore_errors=True)
+                        if self._remove_workspace(path):
                             bt.logging.info(f"    Removed legacy pending-named directory {path}")
                             cleaned_something = True
-                        except Exception as e:
-                            bt.logging.warning(f"    Error removing pending path {path}: {e}")
+                        else:
+                            bt.logging.warning(f"    Error removing pending path {path}")
                     elif path and not os.path.exists(path):
                         bt.logging.info(f"    FS path already gone for {sol.id}, marking cleaned")
                         cleaned_something = True
@@ -1131,26 +1211,31 @@ class SolutionContainerManager:
                 # Try to remove container if it still exists (but we already know it's not a live running one we own)
                 if container_name and self._container_has_validator_label(container_name):
                     if self._docker.stop(container_name):
+                        bt.logging.info(f"    ✅ Stopped recovered container {container_name}")
                         cleaned_something = True
                     if self._docker.rm(container_name, volumes=True):
+                        bt.logging.info(f"    ✅ Removed recovered container {container_name}")
                         cleaned_something = True
+                    else:
+                        bt.logging.warning(f"    ⚠️ Failed to remove recovered container {container_name}")
 
                 # Remove image if we have it and it's ours (best effort)
                 if sol.image_id and self._image_ref_owned_by_validator(sol.image_id):
                     if self._docker.rmi(sol.image_id, force=True):
+                        bt.logging.info(f"    ✅ Removed recovered image {sol.image_id}")
                         cleaned_something = True
-
-                # Remove FS path if it exists (or note it is already gone)
-                if sol.absolute_path_to_solution:
-                    if os.path.exists(sol.absolute_path_to_solution):
-                        try:
-                            shutil.rmtree(sol.absolute_path_to_solution, ignore_errors=True)
-                            bt.logging.info(f"    Removed FS path {sol.absolute_path_to_solution}")
-                            cleaned_something = True
-                        except Exception as e:
-                            bt.logging.warning(f"    Error removing path {sol.absolute_path_to_solution}: {e}")
                     else:
-                        bt.logging.info(f"    FS path already gone for {sol.id}, marking cleaned")
+                        bt.logging.warning(f"    ⚠️ Failed to remove recovered image {sol.image_id}")
+
+                # Remove FS path if it exists (or note it is already gone).
+                if sol.absolute_path_to_solution:
+                    if self._remove_workspace(sol.absolute_path_to_solution):
+                        bt.logging.info(f"    Removed FS path {sol.absolute_path_to_solution}")
+                        cleaned_something = True
+                    else:
+                        # _remove_workspace already logged details/warnings.
+                        # If it returned false the path may have remnants, but we still
+                        # consider the recovery action "done" for this item (best effort).
                         cleaned_something = True
 
                 # Mark cleaned for the orphaned/lost case; also fail in-flight statuses
