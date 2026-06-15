@@ -77,7 +77,7 @@ VALIDATOR_DOCKER_READ_ONLY_ENV: str = "VALIDATOR_DOCKER_READ_ONLY"
 VALIDATOR_DOCKER_READ_ONLY_DEFAULT: bool = True
 
 VALIDATOR_DOCKER_TMPFS_ENV: str = "VALIDATOR_DOCKER_TMPFS"
-VALIDATOR_DOCKER_TMPFS_DEFAULT: str = "/tmp:noexec,nosuid,size=1g"
+VALIDATOR_DOCKER_TMPFS_DEFAULT: str = "/tmp:noexec,nosuid,size=10g"
 
 # Force non-root at ``docker run`` (overrides image USER/CMD default). Miner Dockerfiles
 # must define this account (``USER miner``) or pass ``uid[:gid]``. Empty disables.
