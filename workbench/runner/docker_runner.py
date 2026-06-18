@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -222,13 +223,12 @@ def run_container(
 ) -> RunResult:
     """Run a Docker container with the solver.
 
-    Matches the validator contract: no output volume mount. The solver writes
-    its results to stdout using the solution output protocol (logs, separator,
-    base64 zip). After the container exits, stdout is captured and artifacts
-    are extracted into output_dir (stderr is excluded from extraction, matching
-    the validator's `docker logs --stdout` for the protocol).
+    Matches the validator contract exactly: run detached, then after exit use
+    the `docker logs` command to obtain the output (combined stdout+stderr).
+    This guarantees the workbench sees the exact same stream (and potential
+    interleaving/corruption) that the validator sees at runtime.
 
-    Any container stderr is still included in the returned log text for visibility.
+    Extraction and the returned log are derived from the `docker logs` output.
 
     Security hardening (read-only root, restricted tmpfs, dropped caps,
     no-new-privileges, pids limit, forced non-root user, etc.) is applied using
@@ -258,7 +258,7 @@ def run_container(
     # machines unless the user explicitly sets the validator env vars.
     cmd.extend(_get_workbench_docker_args())
 
-    # No -v for output — we capture stdout instead (matches validator contract).
+    # No -v for output — we capture via `docker logs` after exit (exact runtime contract).
 
     if qasm_file:
         qasm_abs = os.path.abspath(qasm_file)
@@ -268,46 +268,85 @@ def run_container(
         for key, value in env_vars.items():
             cmd.extend(["-e", f"{key}={value}"])
 
+    # Use a unique name so we can run detached and then fetch logs explicitly
+    # (exactly like the validator does at runtime).
+    container_name = f"workbench-{challenge_type}-{uuid.uuid4().hex[:12]}"
+    cmd = [c for c in cmd if c != "--rm"]  # remove --rm, we'll rm manually after logs
+    cmd[cmd.index("run") + 1: cmd.index("run") + 1] = ["-d", "--name", container_name]
+
     cmd.extend([image_name, challenge_id, problem_json])
 
     start = time.time()
+    container_id = None
     try:
+        # Start detached (like validator)
         result = subprocess.run(
             cmd, capture_output=True, timeout=timeout,
         )
         duration = time.time() - start
 
-        raw_stdout = result.stdout or b""
-        raw_stderr = result.stderr or b""
-        container_exit = result.returncode
+        if result.returncode != 0:
+            return RunResult(
+                success=False,
+                exit_code=result.returncode,
+                log=(result.stdout or b"") + (result.stderr or b""),
+                duration=duration,
+            )
 
-        # Enforce the same stdout cap the validator uses when reading container output.
+        container_id = (result.stdout or b"").strip().decode("utf-8", errors="replace")
+        if not container_id:
+            container_id = container_name  # fallback
+
+        # Wait for container to exit (respect remaining timeout)
+        remaining = max(0, timeout - (time.time() - start))
+        container_exit = 0
+        if remaining > 0:
+            try:
+                wait_res = subprocess.run(
+                    ["docker", "wait", container_id],
+                    capture_output=True,
+                    text=True,
+                    timeout=remaining,
+                )
+                container_exit = int(wait_res.stdout.strip() or 0)
+            except subprocess.TimeoutExpired:
+                subprocess.run(["docker", "kill", container_id], capture_output=True)
+                container_exit = 124  # conventional timeout exit
+        else:
+            container_exit = 124
+
+        # Now fetch output using the exact same `docker logs` command as runtime.
+        # This gives the real combined/interleaved stdout+stderr that the protocol
+        # has to deal with.
+        log_res = subprocess.run(
+            ["docker", "logs", container_id],
+            capture_output=True,
+            timeout=30,
+        )
+        combined = (log_res.stdout or b"") + (log_res.stderr or b"")
+
+        # Cleanup container
+        subprocess.run(["docker", "rm", "-f", container_id], capture_output=True)
+
+        # Enforce cap on the combined stream (matches validator)
         max_stdout = _get_stdout_max_bytes()
-        stdout_exceeded = len(raw_stdout) > max_stdout
+        stdout_exceeded = len(combined) > max_stdout
         if stdout_exceeded:
-            raw_stdout = raw_stdout[:max_stdout]
+            combined = combined[:max_stdout]
 
-        # Extract using only stdout (matches the validator's `docker logs --stdout`
-        # behavior for the solution output protocol). This keeps the base64
-        # payload clean. Container stderr is still shown in the run log below.
-        extract_artifacts(raw_stdout, output_dir)
+        extract_artifacts(combined, output_dir)
 
-        # For the log display, only include the text portion (before separator)
-        logs_bytes, _, _ = split_on_separator(raw_stdout)
+        # For display, take pre-separator from the docker logs output.
+        logs_bytes, _, _ = split_on_separator(combined)
         log_text = logs_bytes.decode("utf-8", errors="replace")
-
-        if raw_stderr:
-            log_text += "\n[container stderr]\n" + raw_stderr.decode("utf-8", errors="replace")
 
         if stdout_exceeded:
             log_text += (
-                f"\n[Workbench] stdout exceeded validator limit "
+                f"\n[Workbench] captured output exceeded validator limit "
                 f"({max_stdout} bytes from {SOLUTION_STDOUT_MAX_BYTES_ENV} / default). "
                 "Artifacts may be incomplete or missing — this matches platform rejection behavior."
             )
 
-        # Treat stdout overrun as a failure for the run result (even if container exit was 0),
-        # so the report clearly shows the parity violation (similar to how validator refuses artifacts).
         run_success = (container_exit == 0) and not stdout_exceeded
 
         return RunResult(
@@ -316,9 +355,22 @@ def run_container(
             log=log_text,
             duration=duration,
         )
+
     except subprocess.TimeoutExpired:
+        if container_id:
+            subprocess.run(["docker", "kill", container_id], capture_output=True)
+            subprocess.run(["docker", "rm", "-f", container_id], capture_output=True)
         return RunResult(
             success=False, exit_code=-1,
             log=f"Container timed out after {timeout}s",
+            duration=time.time() - start,
+        )
+    except Exception as e:
+        if container_id:
+            subprocess.run(["docker", "rm", "-f", container_id], capture_output=True)
+        return RunResult(
+            success=False,
+            exit_code=-1,
+            log=f"Error running container: {e}",
             duration=time.time() - start,
         )
