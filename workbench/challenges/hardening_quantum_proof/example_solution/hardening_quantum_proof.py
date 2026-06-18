@@ -49,7 +49,12 @@ from typing import *
 import numpy as np
 
 from enigma_challenges.hardening_quantum_proof import Solution, load_solver_input
-from enigma_challenges.solution_output import build_solution_zip, write_solution_output
+from enigma_challenges.solution_output import (
+    RESULT_JSON_FILENAME,
+    SOLVE_INFO_JSON_FILENAME,
+    build_solution_result_zip,
+    write_solution_output,
+)
 
 
 def _printlog(msg: str) -> None:
@@ -159,16 +164,13 @@ def main() -> None:
     if output_dir:
         try:
             Path(output_dir).mkdir(exist_ok=True)
-            Path(output_dir, "result.json").write_text(result_json)
-            Path(output_dir, "solve_info.json").write_text(solve_info_json)
+            Path(output_dir, RESULT_JSON_FILENAME).write_text(result_json)
+            Path(output_dir, SOLVE_INFO_JSON_FILENAME).write_text(solve_info_json)
         except OSError:
             pass
 
     # Emit solution via stdout protocol (docker/validator mode)
-    zip_bytes = build_solution_zip({
-        "result.json": result_json,
-        "solve_info.json": solve_info_json,
-    })
+    zip_bytes = build_solution_result_zip(result_json, solve_info_json)
     write_solution_output(zip_bytes)
 
     exit_code = 0 if solution.status == "success" else 1

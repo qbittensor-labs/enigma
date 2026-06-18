@@ -18,7 +18,7 @@
 """
 Validation for Hardening Quantum Proof solutions.
 
-Reads the miner's result.json from the solution output, loads the
+Reads the miner's result.json (RESULT_JSON_FILENAME) from the solution output, loads the
 expected peaked state from verif.json (written during setup), and checks
 that the submitted peaked_state matches (exact or reversed bit order).
 """
@@ -33,40 +33,24 @@ from qbittensor.challenges.hardening_quantum_proof import (
     Verif,
     validate_hqp_solution,
 )
+from qbittensor.challenges.solution_output import RESULT_JSON_FILENAME
 from qbittensor.validator.solution.constants import (
     CONTAINER_OUTPUT_DIRNAME,
     CONTAINER_SOLUTION_DIRNAME,
 )
+from qbittensor.validator.solution.run_solution import resolve_verif_json
 
 
 def _find_result_json(solution_folder_path: str) -> str | None:
     """Locate result.json in the solution output directory."""
     candidates = [
-        os.path.join(solution_folder_path, CONTAINER_OUTPUT_DIRNAME, CONTAINER_SOLUTION_DIRNAME, "result.json"),
-        os.path.join(solution_folder_path, CONTAINER_OUTPUT_DIRNAME, "result.json"),
-        os.path.join(solution_folder_path, "result.json"),
+        os.path.join(solution_folder_path, CONTAINER_OUTPUT_DIRNAME, CONTAINER_SOLUTION_DIRNAME, RESULT_JSON_FILENAME),
+        os.path.join(solution_folder_path, CONTAINER_OUTPUT_DIRNAME, RESULT_JSON_FILENAME),
+        os.path.join(solution_folder_path, RESULT_JSON_FILENAME),
     ]
     for path in candidates:
         if os.path.isfile(path):
             return path
-    return None
-
-
-def _find_verif_json(solution_folder_path: str) -> str | None:
-    """Locate verif.json in the workspace directory.
-
-    verif.json is written to the workspace root by hqp_setup
-    (NOT inside the challenge_input_mount that the miner can see).
-    """
-    current = os.path.abspath(solution_folder_path)
-    for _ in range(5):
-        candidate = os.path.join(current, "verif.json")
-        if os.path.isfile(candidate):
-            return candidate
-        parent = os.path.dirname(current)
-        if parent == current:
-            break
-        current = parent
     return None
 
 
@@ -77,7 +61,7 @@ def run(solution_folder_path: str) -> tuple[bool, str | None]:
     Returns (success, failure_reason).
     """
     # Load verification data
-    verif_path = _find_verif_json(solution_folder_path)
+    verif_path = resolve_verif_json(solution_folder_path)
     if not verif_path:
         msg = "verif.json not found -- cannot verify HQP solution"
         bt.logging.error(f"❌ {msg}")
@@ -94,7 +78,7 @@ def run(solution_folder_path: str) -> tuple[bool, str | None]:
     # Load miner's solution
     result_path = _find_result_json(solution_folder_path)
     if not result_path:
-        msg = "result.json not found in solution output"
+        msg = f"{RESULT_JSON_FILENAME} not found in solution output"
         bt.logging.error(f"❌ {msg}")
         return False, msg
 
@@ -102,7 +86,7 @@ def run(solution_folder_path: str) -> tuple[bool, str | None]:
         with open(result_path, "r") as f:
             solution = json.load(f)
     except Exception as e:
-        msg = f"Failed to read result.json: {e}"
+        msg = f"Failed to read {RESULT_JSON_FILENAME}: {e}"
         bt.logging.error(f"❌ {msg}")
         return False, msg
 

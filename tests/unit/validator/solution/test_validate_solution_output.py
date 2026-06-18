@@ -22,6 +22,7 @@ import pytest
 
 from qbittensor.dto.challenge import ChallengeSubmissionVerifyUploadAddressResponse
 from qbittensor.utils.solution_status import SolutionStatus
+from qbittensor.challenges.solution_output import SOLUTION_LOG_FILENAME
 from qbittensor.validator.solution.validate_solution_output import (
     establish_upload_locations_for_solution_data,
     perform_solution_output_validation,
@@ -72,13 +73,13 @@ class TestUploadZipToPlatform:
     def test_uploads_single_file(self, tmp_path):
         out_dir = tmp_path / "output"
         out_dir.mkdir()
-        (out_dir / "stdout.log").write_text("log line")
+        (out_dir / SOLUTION_LOG_FILENAME).write_text("log line")
         platform_data = ChallengeSubmissionVerifyUploadAddressResponse(
             id="id", url="https://upload.example/put"
         )
         with patch("requests.put") as mock_put:
             mock_put.return_value = Mock(status_code=200)
-            upload_zip_to_platform(str(out_dir), platform_data, "stdout.log")
+            upload_zip_to_platform(str(out_dir), platform_data, SOLUTION_LOG_FILENAME)
         mock_put.assert_called_once()
 
     def test_skips_missing_file(self, tmp_path):

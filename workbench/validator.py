@@ -20,9 +20,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from qbittensor.challenges.solution_output import (
+    RESULT_JSON_FILENAME,
+    SOLUTION_LOG_FILENAME,
+    SOLVE_INFO_JSON_FILENAME,
+)
 from qbittensor.validator.solution.validate_docker_image import (
     _validate_dockerfile_content,
-    REJECTED_DOCKERFILE_RULES,
 )
 
 
@@ -55,7 +59,7 @@ def validate_output(
         results.append(validate_dockerfile_security(solution_dir))
 
     # Check required output files
-    for filename in ["result.json", "stdout.log", "solve_info.json"]:
+    for filename in [RESULT_JSON_FILENAME, SOLUTION_LOG_FILENAME, SOLVE_INFO_JSON_FILENAME]:
         filepath = output_path / filename
         results.append(CheckResult(
             name=f"{filename} exists",
@@ -63,19 +67,19 @@ def validate_output(
             message="" if filepath.exists() else f"Missing {filepath}",
         ))
 
-    # Check result.json is valid JSON
-    result_path = output_path / "result.json"
+    # Check result is valid JSON
+    result_path = output_path / RESULT_JSON_FILENAME
     if result_path.exists():
         try:
             with result_path.open() as f:
                 json.load(f)
             results.append(CheckResult(
-                name="result.json is valid JSON",
+                name=f"{RESULT_JSON_FILENAME} is valid JSON",
                 passed=True,
             ))
         except json.JSONDecodeError as e:
             results.append(CheckResult(
-                name="result.json is valid JSON",
+                name=f"{RESULT_JSON_FILENAME} is valid JSON",
                 passed=False,
                 message=f"Invalid JSON: {e}",
             ))
@@ -83,7 +87,7 @@ def validate_output(
     else:
         return results  # Can't check JSON or schema if file missing
 
-    # Check result.json matches Solution schema
+    # Check result matches Solution schema
     try:
         with result_path.open() as f:
             data = json.load(f)
@@ -96,7 +100,7 @@ def validate_output(
             from qbittensor.challenges.mock_challenge import Solution
         else:
             results.append(CheckResult(
-                name="result.json matches Solution schema",
+                name=f"{RESULT_JSON_FILENAME} matches Solution schema",
                 passed=False,
                 message=f"Unknown challenge type: {challenge_type}",
             ))
@@ -104,18 +108,18 @@ def validate_output(
 
         Solution.from_dict(data)
         results.append(CheckResult(
-            name="result.json matches Solution schema",
+            name=f"{RESULT_JSON_FILENAME} matches Solution schema",
             passed=True,
         ))
     except KeyError as e:
         results.append(CheckResult(
-            name="result.json matches Solution schema",
+            name=f"{RESULT_JSON_FILENAME} matches Solution schema",
             passed=False,
             message=f"Missing field: {e}",
         ))
     except TypeError as e:
         results.append(CheckResult(
-            name="result.json matches Solution schema",
+            name=f"{RESULT_JSON_FILENAME} matches Solution schema",
             passed=False,
             message=f"Type error: {e}",
         ))
