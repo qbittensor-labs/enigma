@@ -37,6 +37,8 @@ from workbench.validator import validate_output, validate_dockerfile_security
 from workbench.verifier import verify_breaking_rsa, verify_hardening_quantum_proof, verify_mock
 from workbench.report import print_report
 
+from qbittensor.challenges.solution_output import RESULT_JSON_FILENAME
+
 
 def _warn_non_default(wall_time, allow_network):
     """Warn when settings diverge from validator defaults."""
@@ -159,7 +161,7 @@ def test_breaking_rsa(difficulty, solution, mode, seed, wall_time, allow_network
         schema_ok = all(c.passed for c in validation_results)
         if schema_ok:
             from qbittensor.challenges.breaking_rsa import Solution
-            result_path = Path(os.path.join(output_dir, "result.json"))
+            result_path = Path(os.path.join(output_dir, RESULT_JSON_FILENAME))
             sol = Solution.from_json_file(result_path)
             verify_result = verify_breaking_rsa(problem, sol, verif)
 
@@ -262,7 +264,7 @@ def test_hardening_quantum_proof(difficulty, solution, mode, circuit, wall_time,
         schema_ok = all(c.passed for c in validation_results)
         if schema_ok:
             from qbittensor.challenges.hardening_quantum_proof import Solution
-            result_path = Path(os.path.join(output_dir, "result.json"))
+            result_path = Path(os.path.join(output_dir, RESULT_JSON_FILENAME))
             sol = Solution.from_json_file(result_path)
             verify_result = verify_hardening_quantum_proof(problem, sol, verif)
 
@@ -366,7 +368,7 @@ def test_mock(difficulty, solution, mode, private_key, public_key, wall_time, al
         schema_ok = all(c.passed for c in validation_results)
         if schema_ok:
             from qbittensor.challenges.mock_challenge import Solution
-            result_path = Path(os.path.join(output_dir, "result.json"))
+            result_path = Path(os.path.join(output_dir, RESULT_JSON_FILENAME))
             sol = Solution.from_json_file(result_path)
             verify_result = verify_mock(problem, sol, verif)
 

@@ -29,12 +29,15 @@ from qbittensor.validator.solution.exceptions.invalid_solution import InvalidSol
 from qbittensor.validator.solution.exceptions.validation_errors import ValidationErrors
 from .docker_ops import DockerOps
 from .solution_context import SolutionExecution
+from qbittensor.challenges.solution_output import (
+    RESULT_JSON_FILENAME,
+    SOLUTION_LOG_FILENAME,
+)
 from .constants import (
     CHALLENGE_INPUT_DIRNAME,
     CONTAINER_CHALLENGE_INPUT_PATH,
     CONTAINER_OUTPUT_DIRNAME,
     CONTAINER_SOLUTION_DIRNAME,
-    SOLUTION_LOG_FILENAME,
     SOLUTION_OUTPUT_SEPARATOR,
     SOLUTION_OUTPUT_ZIP_FILENAME,
     SOLUTION_STDOUT_MAX_BYTES_DEFAULT,
@@ -59,6 +62,8 @@ from .constants import (
     VALIDATOR_DOCKER_ULIMIT_NOFILE_ENV,
     VALIDATOR_MEMORY_LIMIT_DEFAULT,
     VALIDATOR_MEMORY_LIMIT_ENV,
+    VALIDATOR_ZIP_MAX_UNCOMPRESSED_BYTES_DEFAULT,
+    VALIDATOR_ZIP_MAX_UNCOMPRESSED_BYTES_ENV,
     VALIDATOR_CONTAINER_STOP_TIMEOUT_DEFAULT,
     VALIDATOR_CONTAINER_STOP_TIMEOUT_ENV,
 )
@@ -83,6 +88,25 @@ def _stdout_max_bytes() -> int:
         return SOLUTION_STDOUT_MAX_BYTES_DEFAULT
 
 
+def _solution_output_max_uncompressed_bytes() -> int:
+    """Max allowed decompressed size for the miner's emitted solution artifacts zip.
+
+    Uses the same env var as input solution zips for consistency.
+    """
+    raw = os.getenv(
+        VALIDATOR_ZIP_MAX_UNCOMPRESSED_BYTES_ENV,
+        str(VALIDATOR_ZIP_MAX_UNCOMPRESSED_BYTES_DEFAULT),
+    ).strip()
+    try:
+        return int(raw)
+    except ValueError:
+        bt.logging.warning(
+            f"Invalid {VALIDATOR_ZIP_MAX_UNCOMPRESSED_BYTES_ENV}={raw!r}; "
+            f"using default {VALIDATOR_ZIP_MAX_UNCOMPRESSED_BYTES_DEFAULT} bytes."
+        )
+        return VALIDATOR_ZIP_MAX_UNCOMPRESSED_BYTES_DEFAULT
+
+
 def prepare_challenge_input_mount_dir(workspace: str) -> str:
     """
     Create a fresh host directory for this run's challenge input (mounted ``:ro``).
@@ -102,7 +126,7 @@ def prepare_challenge_input_mount_dir(workspace: str) -> str:
 
 def extract_stdout_output(container_ref: str, host_workspace: str) -> bool:
     """
-    Pull a stopped miner container's stdout via ``docker logs`` and split it into
+    Pull a stopped miner container's output via ``docker logs`` and split it into
     the run's log file and the run's solution-output zip.
 
     The miner contract is:
@@ -111,13 +135,11 @@ def extract_stdout_output(container_ref: str, host_workspace: str) -> bool:
         <SOLUTION_OUTPUT_SEPARATOR>
         <base64-encoded zip of the solution_artifacts directory>
 
-    Docker's json-file logging driver treats stdout as UTF-8 text and corrupts
-    raw binary bytes; base64 encoding survives the round-trip intact.
+    We capture stdout **only** for protocol extraction (to protect the base64
+    payload from stderr noise). We also capture the full mixed logs.
 
-    Everything before the first occurrence of the separator is written verbatim to
-    ``<host_workspace>/output/stdout.log``. The base64 payload after the separator
-    is decoded, written to ``<host_workspace>/output/solution_artifacts.zip``, and
-    (when valid) extracted into ``<host_workspace>/output/solution_artifacts/``.
+    - Full raw docker logs (stdout + stderr) → ``<host_workspace>/output/container.log`` (SOLUTION_LOG_FILENAME)
+    - Base64 payload → ``solution_artifacts.zip`` then extracted
 
     Returns ``True`` when at least the log file was produced; the function still
     returns ``True`` if the separator was missing (whole stdout → logs, no
@@ -131,11 +153,14 @@ def extract_stdout_output(container_ref: str, host_workspace: str) -> bool:
     os.makedirs(artifacts_dir, exist_ok=True)
 
     max_bytes = _stdout_max_bytes()
+    full_logs_str = ""
     try:
         ops = DockerOps()
-        # Use dedicated logs() method (which uses run_command internally but with proper API)
-        raw_stdout_str = ops.logs(container_ref, check=True)
-        raw_stdout = raw_stdout_str.encode("utf-8", errors="replace") if isinstance(raw_stdout_str, str) else (raw_stdout_str or b"")
+
+        full_logs_str = ops.logs(container_ref, check=True) or ""
+
+        protocol_str = ops.logs(container_ref, check=True, stdout_only=True) or ""
+        raw_stdout = protocol_str.encode("utf-8", errors="replace") if isinstance(protocol_str, str) else (protocol_str or b"")
     except subprocess.CalledProcessError as e:
         stderr = ((e.stderr or e.stdout or b"").decode("utf-8", errors="replace")).strip()
         bt.logging.error(
@@ -148,22 +173,27 @@ def extract_stdout_output(container_ref: str, host_workspace: str) -> bool:
         _write_extraction_diagnostics(artifacts_dir, container_ref, f"Failed to invoke docker logs: {e}")
         return False
 
+    if full_logs_str:
+        log_path = os.path.join(host_output, SOLUTION_LOG_FILENAME)
+        try:
+            with open(log_path, "w", encoding="utf-8", errors="replace") as f:
+                f.write(full_logs_str)
+        except Exception:
+            pass
+
     raw_stdout = raw_stdout or b""
     if len(raw_stdout) > max_bytes:
         bt.logging.error(
             f"❌ Container '{container_ref}' produced {len(raw_stdout)} bytes of stdout, "
             f"exceeding the {max_bytes} byte cap; truncating and refusing to extract artifacts."
         )
-        truncated = raw_stdout[:max_bytes]
-        _write_log_file(host_output, truncated)
         _write_extraction_diagnostics(
             artifacts_dir, container_ref,
-            f"stdout exceeded cap ({len(raw_stdout)} > {max_bytes} bytes). Truncated logs written; no artifacts extracted."
+            f"stdout exceeded cap ({len(raw_stdout)} > {max_bytes} bytes)."
         )
         return False
 
-    logs_bytes, payload_b64, separator_found = _split_on_separator(raw_stdout)
-    _write_log_file(host_output, logs_bytes)
+    _, payload_b64, separator_found = _split_on_separator(raw_stdout)
 
     if not separator_found:
         bt.logging.warning(
@@ -175,13 +205,15 @@ def extract_stdout_output(container_ref: str, host_workspace: str) -> bool:
             "No SOLUTION_OUTPUT_SEPARATOR found in container stdout.\n"
             "The solution must write logs, then exactly this line on its own line:\n"
             f"{SOLUTION_OUTPUT_SEPARATOR.decode('utf-8', errors='replace')!r}\n"
-            "then base64-encoded zip of result.json + output.txt.\n"
+            f"then base64-encoded zip of {RESULT_JSON_FILENAME} (and other files).\n"
             "See the mock_solution.py example for the required contract."
         )
         return True
 
+    payload_b64 = payload_b64.strip()
+
     try:
-        payload_bytes = base64.b64decode(payload_b64.strip(), validate=True)
+        payload_bytes = base64.b64decode(payload_b64, validate=True)
     except (binascii.Error, ValueError) as e:
         bt.logging.error(
             f"❌ Solution payload from '{container_ref}' is not valid base64: {e}"
@@ -228,9 +260,29 @@ def extract_stdout_output(container_ref: str, host_workspace: str) -> bool:
         )
         return False
 
+    max_uncompressed = _solution_output_max_uncompressed_bytes()
+    try:
+        declared = 0
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            for info in zf.infolist():
+                if not info.is_dir():
+                    declared += info.file_size
+        if declared > max_uncompressed:
+            bt.logging.error(
+                f"❌ Solution artifacts zip declares {declared} uncompressed bytes "
+                f"(limit {max_uncompressed}); refusing extraction."
+            )
+            _write_extraction_diagnostics(
+                artifacts_dir, container_ref,
+                f"Declared uncompressed size {declared} exceeds limit {max_uncompressed}."
+            )
+            return False
+    except Exception as e:
+        bt.logging.warning(f"Could not pre-estimate zip size, will rely on streaming limit: {e}")
+
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
-            _safe_extract_zip(zf, artifacts_dir)
+            _safe_extract_zip(zf, artifacts_dir, max_bytes=max_uncompressed)
     except zipfile.BadZipFile as e:
         bt.logging.error(
             f"❌ Failed to read solution zip for '{container_ref}' at '{zip_path}': {e}"
@@ -250,6 +302,28 @@ def extract_stdout_output(container_ref: str, host_workspace: str) -> bool:
     return True
 
 
+def resolve_verif_json(artifacts_dir: str) -> str | None:
+    """Return the canonical <workspace>/verif.json path for this solution.
+
+    Challenge setup writes verif.json to the workspace root (sibling to
+    challenge_input_mount and output/). We know the exact layout, so we
+    compute it directly instead of walking upward from the miner-controlled
+    artifacts directory.
+
+    artifacts_dir is expected to be <workspace>/output/solution_artifacts.
+    """
+    try:
+        p = os.path.abspath(artifacts_dir)
+        output_dir = os.path.dirname(p)
+        ws_root = os.path.dirname(output_dir)
+        candidate = os.path.join(ws_root, "verif.json")
+        if os.path.isfile(candidate):
+            return candidate
+        return None
+    except Exception:
+        return None
+
+
 def _split_on_separator(raw_stdout: bytes) -> tuple[bytes, bytes, bool]:
     """
     Split a stdout byte stream around the first occurrence of
@@ -262,15 +336,6 @@ def _split_on_separator(raw_stdout: bytes) -> tuple[bytes, bytes, bool]:
     if idx == -1:
         return raw_stdout, b"", False
     return raw_stdout[:idx], raw_stdout[idx + len(SOLUTION_OUTPUT_SEPARATOR):], True
-
-
-def _write_log_file(host_output_dir: str, logs_bytes: bytes) -> None:
-    log_path = os.path.join(host_output_dir, SOLUTION_LOG_FILENAME)
-    try:
-        with open(log_path, "wb") as f:
-            f.write(logs_bytes)
-    except OSError as e:
-        bt.logging.error(f"❌ Failed to write log file '{log_path}': {e}")
 
 
 def _write_extraction_diagnostics(artifacts_dir: str, container_ref: str, message: str) -> None:

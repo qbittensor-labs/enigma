@@ -17,7 +17,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 # Define the version of the template module.
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 version_split = __version__.split(".")
 major = int(version_split[0]) if len(version_split) > 0 else 0
 minor = int(version_split[1]) if len(version_split) > 1 else 0

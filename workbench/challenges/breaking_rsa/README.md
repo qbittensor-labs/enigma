@@ -27,7 +27,7 @@ Solutions are executed by validators under these conditions:
 - **Compute:** NVIDIA RTX PRO 6000 (96 GB VRAM), 24 vCPU, 85 GB RAM
 - **Filesystem:** Root filesystem is read-only. Use `/tmp` (tmpfs, currently sized to `VALIDATOR_DOCKER_TMPFS_DEFAULT` with noexec/nosuid) for any scratch space, temp files, or working directories needed at runtime.
 - **User:** Runs as a non-root user (default `miner`). Your Dockerfile should create this user and ensure your solver and any required binaries are accessible to it (see the example_solution/Dockerfile).
-- **Output contract:** In Docker/validator mode there is **no** writable `/output` volume mounted. Your solver must emit results exclusively via the stdout protocol (text logs, then the `SOLUTION_OUTPUT_SEPARATOR` line, then a base64-encoded zip of `result.json` + `solve_info.json` etc.). See `enigma_challenges/solution_output.py` (or the vendored copy at build time). The `OUTPUT_DIR` environment variable is only provided in direct (non-Docker) mode for local development convenience.
+- **Output contract:** In Docker/validator mode there is **no** writable `/output` volume mounted. Your solver must emit results exclusively via the stdout protocol (text logs, then the `SOLUTION_OUTPUT_SEPARATOR` line, then a base64-encoded zip of the files named by RESULT_JSON_FILENAME + SOLVE_INFO_JSON_FILENAME etc.). See `enigma_challenges/solution_output.py` (or the vendored copy at build time) for constants. The `OUTPUT_DIR` environment variable is only provided in direct (non-Docker) mode for local development convenience.
 
 ## Challenge parameters
 
@@ -54,7 +54,7 @@ Your solver receives two positional CLI arguments:
 
 The `OUTPUT_DIR` environment variable (and writing files directly to disk) is only provided in `--mode direct` (non-Docker subprocess) for local development convenience inside the workbench.
 
-### `result.json` (must be inside the emitted zip)
+### `result.json` (RESULT_JSON_FILENAME, must be inside the emitted zip)
 
 ```json
 {
@@ -72,9 +72,9 @@ The `OUTPUT_DIR` environment variable (and writing files directly to disk) is on
 
 ### Other artifacts
 
-Include `solve_info.json` (and any other files your challenge expects) inside the same base64 zip emitted after the separator.
+Include the files named by SOLVE_INFO_JSON_FILENAME (and any other files your challenge expects) inside the same base64 zip emitted after the separator.
 
-`stdout.log` is captured automatically from the text logs you print before the separator (plus stderr).
+`container.log` (full logs) is captured automatically from the container output.
 
 See the example solver and `enigma_challenges/solution_output.py` (or the comment block in the mock example Dockerfile) for the exact protocol.
 

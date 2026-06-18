@@ -58,6 +58,11 @@ import zipfile
 from dataclasses import dataclass
 from typing import Optional
 
+from enigma_challenges.solution_output import (
+    RESULT_JSON_FILENAME,
+    build_solution_result_zip,
+)
+
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 # Must match qbittensor.validator.solution.constants.SOLUTION_OUTPUT_SEPARATOR.
@@ -110,11 +115,7 @@ def _configure_logging(level: int = logging.INFO) -> None:
 
 def _build_solution_zip(result_text: str, output_text: str) -> bytes:
     """Pack the mock solution artifacts into an in-memory zip."""
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("result.json", result_text)
-        zf.writestr("output.txt", output_text)
-    return buffer.getvalue()
+    return build_solution_result_zip(result_text, extra_files={"output.txt": output_text})
 
 
 def _write_solution_output(zip_bytes: bytes) -> None:

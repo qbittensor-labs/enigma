@@ -22,7 +22,7 @@ Miner containers communicate their results via stdout using this protocol:
 
   1. Text logs (human-readable, any format)
   2. A magic separator line (SOLUTION_OUTPUT_SEPARATOR)
-  3. Base64-encoded zip containing result.json and other artifacts
+  3. Base64-encoded zip containing the files named by RESULT_JSON_FILENAME etc. (see constants below)
 
 Docker's json-file logging driver treats stdout as UTF-8 text and corrupts
 raw binary, so the zip MUST be base64-encoded. The validator captures stdout
@@ -47,6 +47,15 @@ SOLUTION_OUTPUT_SEPARATOR: bytes = (
     b"\n----- ENIGMA-SOLUTION-OUTPUT-BEGIN-a8c7f3e2-9d4b-4c5a-8f1e-2b6d3a4e5f7c -----\n"
 )
 
+SOLUTION_LOG_FILENAME: str = "container.log"
+
+# Filenames expected inside the solution artifacts zip (the solver contract).
+RESULT_JSON_FILENAME: str = "result.json"
+SOLVE_INFO_JSON_FILENAME: str = "solve_info.json"
+
+# Filename of the zip that is base64-encoded and emitted after the separator.
+SOLUTION_OUTPUT_ZIP_FILENAME: str = "solution_artifacts.zip"
+
 
 # ---------------------------------------------------------------------------
 # Solver-side helpers
@@ -66,6 +75,33 @@ def build_solution_zip(files: dict[str, str | bytes]) -> bytes:
         for name, content in files.items():
             zf.writestr(name, content)
     return buffer.getvalue()
+
+
+def build_solution_result_zip(
+    result: str | bytes,
+    solve_info: str | bytes | None = None,
+    extra_files: dict[str, str | bytes] | None = None,
+) -> bytes:
+    """Convenience wrapper around build_solution_zip for the common pattern.
+
+    Most solvers emit at minimum:
+      - result.json
+      - solve_info.json (optional but common)
+
+    Usage:
+
+        zip_bytes = build_solution_result_zip(result_json, solve_info_json)
+        # or with more:
+        zip_bytes = build_solution_result_zip(result_json, extra_files={"output.txt": txt})
+
+    This reduces duplication of the filename keys in solver code.
+    """
+    files: dict[str, str | bytes] = {RESULT_JSON_FILENAME: result}
+    if solve_info is not None:
+        files[SOLVE_INFO_JSON_FILENAME] = solve_info
+    if extra_files:
+        files.update(extra_files)
+    return build_solution_zip(files)
 
 
 def write_solution_output(zip_bytes: bytes) -> None:
@@ -108,9 +144,9 @@ def extract_artifacts(
 ) -> tuple[bool, str | None]:
     """Extract solution artifacts from raw container stdout.
 
-    Splits on the separator, writes stdout.log from the log portion,
+    Splits on the separator, writes SOLUTION_LOG_FILENAME from the log portion
     base64-decodes the payload into a zip, and extracts the zip contents
-    (result.json, solve_info.json, etc.) into output_dir.
+    ({RESULT_JSON_FILENAME}, {SOLVE_INFO_JSON_FILENAME}, etc.) into output_dir.
 
     Args:
         raw_stdout: Raw bytes captured from the container's stdout.
@@ -123,16 +159,16 @@ def extract_artifacts(
 
     logs_bytes, payload_b64, found = split_on_separator(raw_stdout)
 
-    # Always write the log portion
-    log_path = os.path.join(output_dir, "stdout.log")
+    # Always write the log portion using SOLUTION_LOG_FILENAME.
+    log_path = os.path.join(output_dir, SOLUTION_LOG_FILENAME)
     with open(log_path, "wb") as f:
         f.write(logs_bytes)
 
     if not found:
         return False, (
-            "No solution output separator found in container stdout. "
-            "The solver must print logs, then the separator line, then "
-            "a base64-encoded zip of result.json and other artifacts."
+            f"No solution output separator found in container stdout. "
+            f"The solver must print logs, then the separator line, then "
+            f"a base64-encoded zip of {RESULT_JSON_FILENAME} and other artifacts."
         )
 
     payload_b64 = payload_b64.strip()
@@ -147,7 +183,7 @@ def extract_artifacts(
     if not payload_bytes:
         return False, "Decoded payload is empty."
 
-    zip_path = os.path.join(output_dir, "solution_artifacts.zip")
+    zip_path = os.path.join(output_dir, SOLUTION_OUTPUT_ZIP_FILENAME)
     with open(zip_path, "wb") as f:
         f.write(payload_bytes)
 
@@ -158,16 +194,36 @@ def extract_artifacts(
         mode = (info.external_attr >> 16) & 0o170000
         return mode == 0o120000
 
+    dest = os.path.abspath(output_dir)
+
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
-            dest = os.path.abspath(output_dir)
             for member in zf.infolist():
                 member_path = os.path.normpath(os.path.join(dest, member.filename))
                 if not (member_path == dest or member_path.startswith(dest + os.sep)):
                     return False, f"Zip member '{member.filename}' escapes output directory."
                 if _is_zip_symlink(member):
                     return False, f"Zip member '{member.filename}' is a symlink (not allowed)."
-            zf.extractall(dest)
+
+            # Manual extraction (like _safe_extract_zip) instead of extractall.
+            # This gives us control and consistent symlink/traversal guarantees.
+            os.makedirs(dest, exist_ok=True)
+            for member in zf.infolist():
+                member_path = os.path.normpath(os.path.join(dest, member.filename))
+                if member.is_dir():
+                    os.makedirs(member_path, exist_ok=True)
+                    continue
+                parent = os.path.dirname(member_path)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                with zf.open(member, "r") as src, open(member_path, "wb") as dst:
+                    while True:
+                        chunk = src.read(64 * 1024)
+                        if not chunk:
+                            break
+                        dst.write(chunk)
+
+            # Post-extraction symlink sweep (belt + suspenders)
             for root, dirs, files in os.walk(dest):
                 for name in list(dirs) + list(files):
                     full = os.path.join(root, name)

@@ -25,13 +25,11 @@ SOLUTIONS_BASE_DIR: str = "data/solutions"
 
 # Host subfolder under each per-solution workspace where the validator materializes
 # the miner's stdout-delivered payload (see run_solution.extract_stdout_output):
-#   <workspace>/output/stdout.log              — text logs (everything before the separator)
+#   <workspace>/output/container.log           — full raw docker logs (stdout + stderr)
 #   <workspace>/output/solution_artifacts.zip  — base64-decoded zip emitted after the separator
 #   <workspace>/output/solution_artifacts/     — zip contents extracted for validation/upload
 CONTAINER_OUTPUT_DIRNAME: str = "output"
 CONTAINER_SOLUTION_DIRNAME: str = "solution_artifacts"
-SOLUTION_LOG_FILENAME: str = "stdout.log"
-SOLUTION_OUTPUT_ZIP_FILENAME: str = "solution_artifacts.zip"
 
 # Docker build logs (captured with --progress=plain) are written here so they
 # can be included in the log package uploaded via log_data_key for diagnostics,
@@ -45,9 +43,16 @@ CONTAINER_CHALLENGE_INPUT_PATH: str = "/challenge_input"
 # from a base64-encoded zip of the solution artifacts (everything after). Docker's
 # json-file logging driver treats stdout as UTF-8 text and corrupts raw binary, so
 # the zip MUST be base64-encoded by the miner and is base64-decoded by the validator.
-# Canonical definition lives in qbittensor.challenges.solution_output; re-exported
-# here for backward compatibility with existing validator imports.
-from qbittensor.challenges.solution_output import SOLUTION_OUTPUT_SEPARATOR  # noqa: F401
+# Canonical definitions (output contract filenames, separator, etc.) live in
+# qbittensor.challenges.solution_output and are re-exported here for convenience.
+from qbittensor.challenges.solution_output import (
+    RESULT_JSON_FILENAME,          # noqa: F401
+    SOLUTION_LOG_FILENAME,         # noqa: F401
+    SOLUTION_OUTPUT_SEPARATOR,     # noqa: F401
+    SOLUTION_OUTPUT_ZIP_FILENAME,  # noqa: F401
+    SOLVE_INFO_JSON_FILENAME,      # noqa: F401
+)
+
 
 # Cap on how many bytes of stdout the validator will read from a single solution
 # container. Anything larger than this means the miner is misbehaving / blasting

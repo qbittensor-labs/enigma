@@ -213,12 +213,17 @@ class DockerOps:
             return res.stdout.strip() or None
         return None
 
-    def logs(self, container_ref: str, tail: Optional[int] = None, check: bool = False) -> str:
+    def logs(self, container_ref: str, tail: Optional[int] = None, check: bool = False, stdout_only: bool = False) -> str:
         """docker logs <container_ref>"""
-        cmd = ["logs", container_ref]
+        cmd = ["logs"]
+        if stdout_only:
+            cmd.append("--stdout")
+        cmd.append(container_ref)
         if tail is not None:
             cmd.extend(["--tail", str(tail)])
         res = self.run_command(cmd, description=f"docker logs {container_ref}", check=check)
+        if stdout_only:
+            return res.stdout or ""
         return (res.stdout or "") + (res.stderr or "")
 
     def build(self, context_dir: str, tags: list[str] | None = None, **extra_args) -> subprocess.CompletedProcess:

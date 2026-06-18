@@ -21,6 +21,8 @@ import time
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from qbittensor.challenges.solution_output import RESULT_JSON_FILENAME
+
 from qbittensor.validator.solution.challenge_inputs.challenge_setups import (
     run_challenge_setup,
 )
@@ -65,7 +67,7 @@ class TestMockSolutionValidation:
         monkeypatch.setenv("ENIGMA_MOCK_PUBLIC_KEY", public_hex)
 
         solution = self._signed_solution(private_key)
-        (tmp_path / "result.json").write_text(json.dumps(solution))
+        (tmp_path / RESULT_JSON_FILENAME).write_text(json.dumps(solution))
         success, reason = run_mock(str(tmp_path))
         assert success is True
         assert reason is None
@@ -79,7 +81,7 @@ class TestMockSolutionValidation:
         payload = json.dumps({"ts": old_ts, "challenge": "mock"})
         signature = private_key.sign(payload.encode("utf-8"))
         solution = {"status": "success", "signature": signature.hex(), "payload": payload}
-        (tmp_path / "result.json").write_text(json.dumps(solution))
+        (tmp_path / RESULT_JSON_FILENAME).write_text(json.dumps(solution))
         success, reason = run_mock(str(tmp_path))
         assert success is False
         assert reason is not None
@@ -94,7 +96,7 @@ class TestMockSolutionValidation:
         payload = json.dumps({"ts": future_ts, "challenge": "mock"})
         signature = private_key.sign(payload.encode("utf-8"))
         solution = {"status": "success", "signature": signature.hex(), "payload": payload}
-        (tmp_path / "result.json").write_text(json.dumps(solution))
+        (tmp_path / RESULT_JSON_FILENAME).write_text(json.dumps(solution))
         success, reason = run_mock(str(tmp_path))
         assert success is False
         assert reason is not None
@@ -119,7 +121,7 @@ class TestSolutionValidator:
             "signature": signature.hex(),
             "payload": payload,
         }
-        (tmp_path / "result.json").write_text(json.dumps(solution))
+        (tmp_path / RESULT_JSON_FILENAME).write_text(json.dumps(solution))
         success, reason = validate_output(str(tmp_path), MOCK_CHALLENGE_ID)
         assert success is True
         assert reason is None

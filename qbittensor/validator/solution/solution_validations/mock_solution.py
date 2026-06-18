@@ -26,6 +26,7 @@ from qbittensor.challenges.mock_challenge import (
     Verif as MockVerif,
     validate_mock_solution,
 )
+from qbittensor.challenges.solution_output import RESULT_JSON_FILENAME
 
 # Default for the platform's mock challenge (can be overridden via env).
 ENIGMA_MOCK_PUBLIC_KEY = "5a557ee758020954a512c632993637761bdf933a3f59b080981a98e7ba33d191"
@@ -37,7 +38,7 @@ def _read_solution_payload(file_path: str) -> dict:
         with open(file_path, "r", encoding="utf-8") as file:
             return json.load(file)
 
-    result_json = os.path.join(file_path, "result.json")
+    result_json = os.path.join(file_path, RESULT_JSON_FILENAME)
     output_txt = os.path.join(file_path, "output.txt")
 
     if os.path.isfile(result_json):

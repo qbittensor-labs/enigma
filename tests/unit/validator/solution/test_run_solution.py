@@ -22,16 +22,16 @@ import subprocess
 import uuid
 import zipfile
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, Mock, call, patch
 
 import pytest
 
+from qbittensor.challenges.solution_output import RESULT_JSON_FILENAME, SOLUTION_LOG_FILENAME
 from qbittensor.validator.solution.constants import (
     CHALLENGE_INPUT_DIRNAME,
     CONTAINER_CHALLENGE_INPUT_PATH,
     CONTAINER_OUTPUT_DIRNAME,
     CONTAINER_SOLUTION_DIRNAME,
-    SOLUTION_LOG_FILENAME,
     SOLUTION_OUTPUT_SEPARATOR,
     SOLUTION_OUTPUT_ZIP_FILENAME,
     VALIDATOR_DOCKER_CPU_LIMIT_DEFAULT,
@@ -87,27 +87,32 @@ class TestExtractStdoutOutput:
     def test_splits_logs_and_solution_zip(self, tmp_path):
         workspace = tmp_path / "workspace"
         workspace.mkdir()
-        zip_bytes = _make_zip({"result.json": '{"hello": "world"}', "output.txt": "Hello"})
+        zip_bytes = _make_zip({RESULT_JSON_FILENAME: '{"hello": "world"}', "output.txt": "Hello"})
         stdout = _build_stdout_with_payload(b"line1\nline2\n", zip_bytes)
 
         with patch("qbittensor.validator.solution.run_solution.DockerOps") as mock_docker_cls:
             mock_ops = MagicMock()
-            mock_ops.logs.return_value = stdout
+            # Simulate real logs() returning text (text=True in subprocess)
+            mock_ops.logs.return_value = stdout if isinstance(stdout, str) else stdout.decode("utf-8", errors="replace")
             mock_docker_cls.return_value = mock_ops
             assert extract_stdout_output("ctr", str(workspace)) is True
 
-        mock_ops.logs.assert_called_once_with("ctr", check=True)
+        mock_ops.logs.assert_has_calls([
+            call("ctr", check=True),
+            call("ctr", check=True, stdout_only=True),
+        ])
 
         log_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_LOG_FILENAME
         assert log_path.is_file()
-        assert log_path.read_bytes() == b"line1\nline2\n"
+        # Full captured logs (from the non-stdout_only call) are now written to the log file
+        assert log_path.read_bytes() == stdout
 
         zip_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_OUTPUT_ZIP_FILENAME
         assert zip_path.is_file()
         assert zip_path.read_bytes() == zip_bytes
 
         artifacts_dir = workspace / CONTAINER_OUTPUT_DIRNAME / CONTAINER_SOLUTION_DIRNAME
-        assert (artifacts_dir / "result.json").is_file()
+        assert (artifacts_dir / RESULT_JSON_FILENAME).is_file()
         assert (artifacts_dir / "output.txt").read_text() == "Hello"
 
     def test_only_first_separator_delimits(self, tmp_path):
@@ -120,10 +125,14 @@ class TestExtractStdoutOutput:
 
         with patch("qbittensor.validator.solution.run_solution.DockerOps") as mock_docker_cls:
             mock_ops = MagicMock()
-            mock_ops.logs.return_value = stdout
+            # Simulate real logs() returning text (text=True in subprocess)
+            mock_ops.logs.return_value = stdout if isinstance(stdout, str) else stdout.decode("utf-8", errors="replace")
             mock_docker_cls.return_value = mock_ops
             assert extract_stdout_output("ctr", str(workspace)) is True
-        mock_ops.logs.assert_called_once_with("ctr", check=True)
+        mock_ops.logs.assert_has_calls([
+            call("ctr", check=True),
+            call("ctr", check=True, stdout_only=True),
+        ])
 
         zip_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_OUTPUT_ZIP_FILENAME
         assert zip_path.read_bytes() == zip_bytes
@@ -134,25 +143,34 @@ class TestExtractStdoutOutput:
         stdout_logs_have_sep = SOLUTION_OUTPUT_SEPARATOR + b"logs\n" + SOLUTION_OUTPUT_SEPARATOR + b64_payload
         with patch("qbittensor.validator.solution.run_solution.DockerOps") as mock_docker_cls:
             mock_ops = MagicMock()
-            mock_ops.logs.return_value = stdout_logs_have_sep
+            # Simulate real logs() returning text (text=True in subprocess)
+            mock_ops.logs.return_value = stdout_logs_have_sep if isinstance(stdout_logs_have_sep, str) else stdout_logs_have_sep.decode("utf-8", errors="replace")
             mock_docker_cls.return_value = mock_ops
             # First separator splits at offset 0 → logs are empty,
             # payload starts with "logs\n<separator><b64>" which is not valid base64.
             assert extract_stdout_output("ctr", str(ws2)) is False
-        mock_ops.logs.assert_called_once_with("ctr", check=True)
+        mock_ops.logs.assert_has_calls([
+            call("ctr", check=True),
+            call("ctr", check=True, stdout_only=True),
+        ])
         log_path = ws2 / CONTAINER_OUTPUT_DIRNAME / SOLUTION_LOG_FILENAME
-        assert log_path.read_bytes() == b""
+        # Full captured output is written to the log file (new behavior)
+        assert log_path.read_bytes() == stdout_logs_have_sep
 
     def test_missing_separator_writes_logs_only(self, tmp_path):
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         with patch("qbittensor.validator.solution.run_solution.DockerOps") as mock_docker_cls:
             mock_ops = MagicMock()
-            mock_ops.logs.return_value = b"oops no marker\n"
+            # Simulate real logs() returning text (text=True in subprocess)
+            mock_ops.logs.return_value = b"oops no marker\n" if isinstance(b"oops no marker\n", str) else b"oops no marker\n".decode("utf-8", errors="replace")
             mock_docker_cls.return_value = mock_ops
             assert extract_stdout_output("ctr", str(workspace)) is True
 
-        mock_ops.logs.assert_called_once_with("ctr", check=True)
+        mock_ops.logs.assert_has_calls([
+            call("ctr", check=True),
+            call("ctr", check=True, stdout_only=True),
+        ])
         log_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_LOG_FILENAME
         assert log_path.is_file()
         assert log_path.read_bytes() == b"oops no marker\n"
@@ -170,13 +188,18 @@ class TestExtractStdoutOutput:
         stdout = _build_stdout_with_payload(b"log\n", not_a_zip)
         with patch("qbittensor.validator.solution.run_solution.DockerOps") as mock_docker_cls:
             mock_ops = MagicMock()
-            mock_ops.logs.return_value = stdout
+            # Simulate real logs() returning text (text=True in subprocess)
+            mock_ops.logs.return_value = stdout if isinstance(stdout, str) else stdout.decode("utf-8", errors="replace")
             mock_docker_cls.return_value = mock_ops
             assert extract_stdout_output("ctr", str(workspace)) is False
 
-        mock_ops.logs.assert_called_once_with("ctr", check=True)
+        mock_ops.logs.assert_has_calls([
+            call("ctr", check=True),
+            call("ctr", check=True, stdout_only=True),
+        ])
         log_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_LOG_FILENAME
-        assert log_path.read_bytes() == b"log\n"
+        # Full captured output written to log file
+        assert log_path.read_bytes() == stdout
         zip_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_OUTPUT_ZIP_FILENAME
         assert zip_path.read_bytes() == not_a_zip
         artifacts_dir = workspace / CONTAINER_OUTPUT_DIRNAME / CONTAINER_SOLUTION_DIRNAME
@@ -193,13 +216,17 @@ class TestExtractStdoutOutput:
         stdout = _build_stdout_with_payload(b"log\n", b"!!!not-base64!!!", encode=False)
         with patch("qbittensor.validator.solution.run_solution.DockerOps") as mock_docker_cls:
             mock_ops = MagicMock()
-            mock_ops.logs.return_value = stdout
+            # Simulate real logs() returning text (text=True in subprocess)
+            mock_ops.logs.return_value = stdout if isinstance(stdout, str) else stdout.decode("utf-8", errors="replace")
             mock_docker_cls.return_value = mock_ops
             assert extract_stdout_output("ctr", str(workspace)) is False
 
-        mock_ops.logs.assert_called_once_with("ctr", check=True)
+        mock_ops.logs.assert_has_calls([
+            call("ctr", check=True),
+            call("ctr", check=True, stdout_only=True),
+        ])
         log_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_LOG_FILENAME
-        assert log_path.read_bytes() == b"log\n"
+        assert log_path.read_bytes() == stdout
         assert not (workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_OUTPUT_ZIP_FILENAME).exists()
 
     def test_truncates_when_stdout_exceeds_cap(self, tmp_path, monkeypatch):
@@ -211,14 +238,18 @@ class TestExtractStdoutOutput:
 
         with patch("qbittensor.validator.solution.run_solution.DockerOps") as mock_docker_cls:
             mock_ops = MagicMock()
-            mock_ops.logs.return_value = stdout
+            # Simulate real logs() returning text (text=True in subprocess)
+            mock_ops.logs.return_value = stdout if isinstance(stdout, str) else stdout.decode("utf-8", errors="replace")
             mock_docker_cls.return_value = mock_ops
             assert extract_stdout_output("ctr", str(workspace)) is False
 
-        mock_ops.logs.assert_called_once_with("ctr", check=True)
+        mock_ops.logs.assert_has_calls([
+            call("ctr", check=True),
+            call("ctr", check=True, stdout_only=True),
+        ])
         log_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_LOG_FILENAME
-        # Logs file holds only the truncated prefix; no artifact extraction at all.
-        assert len(log_path.read_bytes()) == 16
+        # Full captured logs are written (truncation only affects protocol extraction, not the diagnostic log file)
+        assert log_path.read_bytes() == stdout
         assert not (workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_OUTPUT_ZIP_FILENAME).exists()
 
     def test_docker_logs_failure_returns_false(self, tmp_path):
@@ -243,11 +274,15 @@ class TestExtractStdoutOutput:
 
         with patch("qbittensor.validator.solution.run_solution.DockerOps") as mock_docker_cls:
             mock_ops = MagicMock()
-            mock_ops.logs.return_value = stdout
+            # Simulate real logs() returning text (text=True in subprocess)
+            mock_ops.logs.return_value = stdout if isinstance(stdout, str) else stdout.decode("utf-8", errors="replace")
             mock_docker_cls.return_value = mock_ops
             assert extract_stdout_output("ctr", str(workspace)) is False
 
-        mock_ops.logs.assert_called_once_with("ctr", check=True)
+        mock_ops.logs.assert_has_calls([
+            call("ctr", check=True),
+            call("ctr", check=True, stdout_only=True),
+        ])
         assert not (workspace.parent / "escape.txt").exists()
 
 
@@ -545,9 +580,9 @@ class TestMockSolutionDockerIntegration:
             artifacts_dir = (
                 workspace / CONTAINER_OUTPUT_DIRNAME / CONTAINER_SOLUTION_DIRNAME
             )
-            result_json = artifacts_dir / "result.json"
+            result_json = artifacts_dir / RESULT_JSON_FILENAME
             assert result_json.is_file(), (
-                "mock_solution did not emit result.json in its stdout-delivered zip"
+                f"mock_solution did not emit {RESULT_JSON_FILENAME} in its stdout-delivered zip"
             )
             payload = json.loads(result_json.read_text(encoding="utf-8"))
             assert payload.get("status") == "success"

@@ -225,7 +225,10 @@ def run_container(
     Matches the validator contract: no output volume mount. The solver writes
     its results to stdout using the solution output protocol (logs, separator,
     base64 zip). After the container exits, stdout is captured and artifacts
-    are extracted into output_dir.
+    are extracted into output_dir (stderr is excluded from extraction, matching
+    the validator's `docker logs --stdout` for the protocol).
+
+    Any container stderr is still included in the returned log text for visibility.
 
     Security hardening (read-only root, restricted tmpfs, dropped caps,
     no-new-privileges, pids limit, forced non-root user, etc.) is applied using
@@ -275,25 +278,26 @@ def run_container(
         duration = time.time() - start
 
         raw_stdout = result.stdout or b""
+        raw_stderr = result.stderr or b""
         container_exit = result.returncode
 
         # Enforce the same stdout cap the validator uses when reading container output.
-        # Oversized stdout means the solution is misbehaving (matches validator
-        # behavior in run_solution.extract_stdout_output).
         max_stdout = _get_stdout_max_bytes()
         stdout_exceeded = len(raw_stdout) > max_stdout
         if stdout_exceeded:
             raw_stdout = raw_stdout[:max_stdout]
 
-        # Extract solution artifacts from stdout (same protocol as validator).
-        # If we truncated, artifacts will likely be missing/incomplete (parity).
+        # Extract using only stdout (matches the validator's `docker logs --stdout`
+        # behavior for the solution output protocol). This keeps the base64
+        # payload clean. Container stderr is still shown in the run log below.
         extract_artifacts(raw_stdout, output_dir)
 
         # For the log display, only include the text portion (before separator)
         logs_bytes, _, _ = split_on_separator(raw_stdout)
         log_text = logs_bytes.decode("utf-8", errors="replace")
-        if result.stderr:
-            log_text += "\n" + result.stderr.decode("utf-8", errors="replace")
+
+        if raw_stderr:
+            log_text += "\n[container stderr]\n" + raw_stderr.decode("utf-8", errors="replace")
 
         if stdout_exceeded:
             log_text += (

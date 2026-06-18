@@ -53,7 +53,7 @@ Solutions are executed by validators under these conditions:
 - **Compute:** NVIDIA RTX PRO 6000 (96 GB VRAM), 24 vCPU, 85 GB RAM
 - **Filesystem:** Root filesystem is read-only. Use `/tmp` (tmpfs, noexec/nosuid) for scratch space.
 - **User:** Runs as a non-root user (default `miner`). Your Dockerfile should create this user and ensure your solver and any required binaries are accessible to it (see the example Dockerfile).
-- **Output contract:** There is **no** writable volume mounted. Your solver must emit results via the stdout protocol (text logs, then the `SOLUTION_OUTPUT_SEPARATOR` line, then a base64-encoded zip of `result.json` + `solve_info.json`). See `enigma_challenges/solution_output.py` for the exact protocol. The `OUTPUT_DIR` environment variable is only available in `--mode direct` for local development.
+- **Output contract:** There is **no** writable volume mounted. Your solver must emit results via the stdout protocol (text logs, then the `SOLUTION_OUTPUT_SEPARATOR` line, then a base64-encoded zip of the files in RESULT_JSON_FILENAME + SOLVE_INFO_JSON_FILENAME etc). See `enigma_challenges/solution_output.py` for the exact protocol and constants. The `OUTPUT_DIR` environment variable is only available in `--mode direct` for local development.
 
 ## Challenge parameters
 
@@ -104,11 +104,11 @@ exclusively by writing to **stdout** using the solution output protocol:
 
 1. Human-readable text logs
 2. The `SOLUTION_OUTPUT_SEPARATOR` line (see `enigma_challenges/solution_output.py`)
-3. A base64-encoded zip containing `result.json` and `solve_info.json`
+3. A base64-encoded zip containing the files named by `RESULT_JSON_FILENAME` and `SOLVE_INFO_JSON_FILENAME` (and any extra)
 
 The validator captures stdout via `docker logs` after the container exits.
 
-### `result.json`
+### `result.json` (RESULT_JSON_FILENAME)
 
 ```json
 {
@@ -122,7 +122,7 @@ The validator captures stdout via `docker logs` after the container exits.
 | `status` | str | Final solution status (`"success"`, `"failed"`, `"timeout"`) |
 | `peaked_state` | str or null | The peaked bitstring (only `0`s and `1`s) |
 
-### `solve_info.json`
+### `solve_info.json` (SOLVE_INFO_JSON_FILENAME)
 
 | Field | Type | Description |
 |-------|------|-------------|

@@ -80,7 +80,7 @@ python -m workbench keygen
    after the container exits. In direct mode, the `OUTPUT_DIR` env var is
    provided for convenience and files may be written there.
 4. **Validate** -- Checks that required output files exist and conform to the
-   expected schema (`result.json`, `stdout.log`, `solve_info.json`)
+   expected schema (see RESULT_JSON_FILENAME, SOLUTION_LOG_FILENAME, SOLVE_INFO_JSON_FILENAME in solution_output.py)
 5. **Verify** -- Compares your solution against the known answer
 
 ## Solution directory layout

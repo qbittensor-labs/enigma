@@ -19,6 +19,8 @@ import os
 import subprocess
 import time
 from pathlib import Path
+
+from qbittensor.challenges.solution_output import SOLUTION_LOG_FILENAME
 from .docker_runner import RunResult
 
 from qbittensor.challenges.solution_output import SOLUTION_OUTPUT_SEPARATOR
@@ -93,10 +95,10 @@ def run_direct(
             log_text = log_text[:sep_idx]
         log_text += result.stderr
 
-        # Write stdout.log so the workbench validator finds it
-        stdout_log_path = os.path.join(output_dir, "stdout.log")
-        if not os.path.exists(stdout_log_path):
-            with open(stdout_log_path, "w") as f:
+        # Write SOLUTION_LOG_FILENAME
+        log_path = os.path.join(output_dir, SOLUTION_LOG_FILENAME)
+        if not os.path.exists(log_path):
+            with open(log_path, "w") as f:
                 f.write(log_text)
 
         return RunResult(

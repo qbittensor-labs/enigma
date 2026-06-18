@@ -24,11 +24,11 @@ import requests
 import bittensor as bt
 from qbittensor.dto.challenge import ChallengeSubmissionVerifyUploadAddressResponse
 from qbittensor.utils.solution_status import SolutionStatus
+from qbittensor.challenges.solution_output import SOLUTION_LOG_FILENAME
 from qbittensor.validator.solution.constants import (
     CONTAINER_OUTPUT_DIRNAME,
     CONTAINER_SOLUTION_DIRNAME,
     DOCKER_BUILD_LOG_FILENAME,
-    SOLUTION_LOG_FILENAME,
 )
 from qbittensor.validator.solution.solution_validations.solution_validator import validate_output
 from qbittensor.database.db_connection import DBConnection
@@ -170,7 +170,7 @@ def perform_solution_output_validation(
             bt.logging.warning(f"⚠️ Failed to upload solution artifacts on failure path: {upload_exc}")
             output_uploaded = False
 
-        failure_message = validation_failure_reason or "Output validation failed (see uploaded stdout.log and solution_output artifacts for details)"
+        failure_message = validation_failure_reason or "Output validation failed (see uploaded container.log and solution_output artifacts for details)"
         failure_message = f"Milestone {challenge_milestone_id}: {failure_message}"
 
         report_payload = {
@@ -282,16 +282,17 @@ def upload_logs_package(
 
     The package intentionally includes:
       - docker_build.log (always written with --progress=plain before/during build)
-      - stdout.log (container run logs, if the solution container produced any)
+      - SOLUTION_LOG_FILENAME (full docker logs output, including both stdout and stderr)
       - Any *diagnostics*.txt files (e.g. extraction failures)
 
-    This becomes the artifact referenced by ``log_data_key`` so that build logs
-    and run logs are available for diagnostics on both success and failure paths.
+    This becomes the artifact referenced by ``log_data_key``
+    so that build logs and run logs (including stderr) are available for diagnostics
+    on both success and failure paths.
     """
     import tempfile
     import zipfile
 
-    bt.logging.info("📤 Building logs package (docker_build.log + stdout.log + diagnostics)...")
+    bt.logging.info(f"📤 Building logs package (docker_build.log + {SOLUTION_LOG_FILENAME} + diagnostics)...")
 
     if not os.path.isdir(container_output_path):
         bt.logging.error(
@@ -299,10 +300,10 @@ def upload_logs_package(
         )
         return False
 
-    # Collect candidate log files (order is not critical)
+    # Collect candidate log files for the diagnostic package.
     candidates = [
         DOCKER_BUILD_LOG_FILENAME,
-        SOLUTION_LOG_FILENAME,
+        SOLUTION_LOG_FILENAME,  # the full container logs (stdout + stderr)
     ]
     # Also pick up any extraction or other diagnostics
     try:
