@@ -97,14 +97,11 @@ class TestExtractStdoutOutput:
             mock_docker_cls.return_value = mock_ops
             assert extract_stdout_output("ctr", str(workspace)) is True
 
-        mock_ops.logs.assert_has_calls([
-            call("ctr", check=True),
-            call("ctr", check=True, stdout_only=True),
-        ])
+        mock_ops.logs.assert_called_once_with("ctr", check=True)
 
         log_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_LOG_FILENAME
         assert log_path.is_file()
-        # Full captured logs (from the non-stdout_only call) are now written to the log file
+        # Full captured logs (combined) are written to the log file
         assert log_path.read_bytes() == stdout
 
         zip_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_OUTPUT_ZIP_FILENAME
@@ -129,10 +126,7 @@ class TestExtractStdoutOutput:
             mock_ops.logs.return_value = stdout if isinstance(stdout, str) else stdout.decode("utf-8", errors="replace")
             mock_docker_cls.return_value = mock_ops
             assert extract_stdout_output("ctr", str(workspace)) is True
-        mock_ops.logs.assert_has_calls([
-            call("ctr", check=True),
-            call("ctr", check=True, stdout_only=True),
-        ])
+        mock_ops.logs.assert_called_once_with("ctr", check=True)
 
         zip_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_OUTPUT_ZIP_FILENAME
         assert zip_path.read_bytes() == zip_bytes
@@ -149,12 +143,9 @@ class TestExtractStdoutOutput:
             # First separator splits at offset 0 → logs are empty,
             # payload starts with "logs\n<separator><b64>" which is not valid base64.
             assert extract_stdout_output("ctr", str(ws2)) is False
-        mock_ops.logs.assert_has_calls([
-            call("ctr", check=True),
-            call("ctr", check=True, stdout_only=True),
-        ])
+        mock_ops.logs.assert_called_once_with("ctr", check=True)
         log_path = ws2 / CONTAINER_OUTPUT_DIRNAME / SOLUTION_LOG_FILENAME
-        # Full captured output is written to the log file (new behavior)
+        # Full captured logs (combined) are written to the log file
         assert log_path.read_bytes() == stdout_logs_have_sep
 
     def test_missing_separator_writes_logs_only(self, tmp_path):
@@ -167,10 +158,7 @@ class TestExtractStdoutOutput:
             mock_docker_cls.return_value = mock_ops
             assert extract_stdout_output("ctr", str(workspace)) is True
 
-        mock_ops.logs.assert_has_calls([
-            call("ctr", check=True),
-            call("ctr", check=True, stdout_only=True),
-        ])
+        mock_ops.logs.assert_called_once_with("ctr", check=True)
         log_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_LOG_FILENAME
         assert log_path.is_file()
         assert log_path.read_bytes() == b"oops no marker\n"
@@ -193,12 +181,9 @@ class TestExtractStdoutOutput:
             mock_docker_cls.return_value = mock_ops
             assert extract_stdout_output("ctr", str(workspace)) is False
 
-        mock_ops.logs.assert_has_calls([
-            call("ctr", check=True),
-            call("ctr", check=True, stdout_only=True),
-        ])
+        mock_ops.logs.assert_called_once_with("ctr", check=True)
         log_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_LOG_FILENAME
-        # Full captured output written to log file
+        # Full captured logs (combined) are written to log file
         assert log_path.read_bytes() == stdout
         zip_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_OUTPUT_ZIP_FILENAME
         assert zip_path.read_bytes() == not_a_zip
@@ -221,10 +206,7 @@ class TestExtractStdoutOutput:
             mock_docker_cls.return_value = mock_ops
             assert extract_stdout_output("ctr", str(workspace)) is False
 
-        mock_ops.logs.assert_has_calls([
-            call("ctr", check=True),
-            call("ctr", check=True, stdout_only=True),
-        ])
+        mock_ops.logs.assert_called_once_with("ctr", check=True)
         log_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_LOG_FILENAME
         assert log_path.read_bytes() == stdout
         assert not (workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_OUTPUT_ZIP_FILENAME).exists()
@@ -243,12 +225,9 @@ class TestExtractStdoutOutput:
             mock_docker_cls.return_value = mock_ops
             assert extract_stdout_output("ctr", str(workspace)) is False
 
-        mock_ops.logs.assert_has_calls([
-            call("ctr", check=True),
-            call("ctr", check=True, stdout_only=True),
-        ])
+        mock_ops.logs.assert_called_once_with("ctr", check=True)
         log_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_LOG_FILENAME
-        # Full captured logs are written (truncation only affects protocol extraction, not the diagnostic log file)
+        # Full captured logs (combined) are written to log file
         assert log_path.read_bytes() == stdout
         assert not (workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_OUTPUT_ZIP_FILENAME).exists()
 
@@ -279,10 +258,7 @@ class TestExtractStdoutOutput:
             mock_docker_cls.return_value = mock_ops
             assert extract_stdout_output("ctr", str(workspace)) is False
 
-        mock_ops.logs.assert_has_calls([
-            call("ctr", check=True),
-            call("ctr", check=True, stdout_only=True),
-        ])
+        mock_ops.logs.assert_called_once_with("ctr", check=True)
         assert not (workspace.parent / "escape.txt").exists()
 
 

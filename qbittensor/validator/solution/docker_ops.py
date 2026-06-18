@@ -214,16 +214,16 @@ class DockerOps:
         return None
 
     def logs(self, container_ref: str, tail: Optional[int] = None, check: bool = False, stdout_only: bool = False) -> str:
-        """docker logs <container_ref>"""
-        cmd = ["logs"]
-        if stdout_only:
-            cmd.append("--stdout")
-        cmd.append(container_ref)
+        """docker logs <container_ref>
+
+        Note: docker logs CLI always returns the combined stdout+stderr stream.
+        Callers that need a clean protocol payload should use clean_base64_payload().
+        """
+        cmd = ["logs", container_ref]
         if tail is not None:
             cmd.extend(["--tail", str(tail)])
         res = self.run_command(cmd, description=f"docker logs {container_ref}", check=check)
-        if stdout_only:
-            return res.stdout or ""
+        # Always combined
         return (res.stdout or "") + (res.stderr or "")
 
     def build(self, context_dir: str, tags: list[str] | None = None, **extra_args) -> subprocess.CompletedProcess:

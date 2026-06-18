@@ -135,8 +135,9 @@ def extract_stdout_output(container_ref: str, host_workspace: str) -> bool:
         <SOLUTION_OUTPUT_SEPARATOR>
         <base64-encoded zip of the solution_artifacts directory>
 
-    We capture stdout **only** for protocol extraction (to protect the base64
-    payload from stderr noise). We also capture the full mixed logs.
+    We capture the combined output from `docker logs` (CLI always mixes stdout+stderr).
+    The full combined stream is written to the diagnostics log file.
+    Protocol extraction uses a tolerant base64 decoder to handle possible trailing stderr junk.
 
     - Full raw docker logs (stdout + stderr) → ``<host_workspace>/output/container.log`` (SOLUTION_LOG_FILENAME)
     - Base64 payload → ``solution_artifacts.zip`` then extracted
@@ -157,10 +158,10 @@ def extract_stdout_output(container_ref: str, host_workspace: str) -> bool:
     try:
         ops = DockerOps()
 
+        # Plain docker logs (combined stdout+stderr). Full for diagnostics.
+        # Protocol extraction tolerates trailing junk.
         full_logs_str = ops.logs(container_ref, check=True) or ""
-
-        protocol_str = ops.logs(container_ref, check=True, stdout_only=True) or ""
-        raw_stdout = protocol_str.encode("utf-8", errors="replace") if isinstance(protocol_str, str) else (protocol_str or b"")
+        raw_stdout = full_logs_str.encode("utf-8", errors="replace") if isinstance(full_logs_str, str) else (full_logs_str or b"")
     except subprocess.CalledProcessError as e:
         stderr = ((e.stderr or e.stdout or b"").decode("utf-8", errors="replace")).strip()
         bt.logging.error(
@@ -211,6 +212,10 @@ def extract_stdout_output(container_ref: str, host_workspace: str) -> bool:
         return True
 
     payload_b64 = payload_b64.strip()
+
+    # Use shared tolerant cleaner (handles combined docker logs stream)
+    from qbittensor.challenges.solution_output import clean_base64_payload
+    payload_b64 = clean_base64_payload(payload_b64)
 
     try:
         payload_bytes = base64.b64decode(payload_b64, validate=True)

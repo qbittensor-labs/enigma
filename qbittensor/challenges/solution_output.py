@@ -125,6 +125,30 @@ def write_solution_output(zip_bytes: bytes) -> None:
 # Reader-side helpers (validator / workbench)
 # ---------------------------------------------------------------------------
 
+def clean_base64_payload(payload_b64: bytes | str) -> bytes | str:
+    """Take only the leading valid base64 characters from the payload section.
+    This tolerates trailing junk (e.g. stderr text) when using combined docker logs.
+    """
+    if isinstance(payload_b64, (bytes, bytearray)):
+        payload_b64 = payload_b64.strip()
+        import re
+        m = re.match(rb"^[A-Za-z0-9+/=\s]*", payload_b64)
+        if m:
+            candidate = m.group(0).strip()
+            if candidate:
+                return candidate
+        return payload_b64
+    else:
+        payload_b64 = payload_b64.strip()
+        import re
+        m = re.match(r"^[A-Za-z0-9+/=\s]*", payload_b64)
+        if m:
+            candidate = m.group(0).strip()
+            if candidate:
+                return candidate
+        return payload_b64
+
+
 def split_on_separator(raw_stdout: bytes) -> tuple[bytes, bytes, bool]:
     """Split raw stdout bytes at the solution output separator.
 
@@ -174,6 +198,8 @@ def extract_artifacts(
     payload_b64 = payload_b64.strip()
     if not payload_b64:
         return False, "Separator found but base64 payload is empty."
+
+    payload_b64 = clean_base64_payload(payload_b64)
 
     try:
         payload_bytes = base64.b64decode(payload_b64, validate=True)

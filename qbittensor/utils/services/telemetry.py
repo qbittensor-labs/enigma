@@ -221,6 +221,7 @@ class TelemetryService:
         self.flush_interval = export_interval_millis / 1000.0
         self.device = device
         self.gpu_indices = []
+        self._pynvml_initialized = False
         self.queue = queue.Queue(maxsize=max_queue_size)
         self._stop_event = threading.Event()
         self._worker_thread = None
@@ -402,7 +403,9 @@ class TelemetryService:
             self._enqueue_datapoint("system_gpu_models", timestamp, gpu_models)
 
             # Store GPU indices *only* for periodic metrics (which require live pynvml handles).
-            # We do a fresh init here; _get_gpu_info may have already done one+shutdown.
+            # We do a temporary init/shutdown (like _get_gpu_info) to discover devices,
+            # then perform a persistent nvmlInit() so that record_system_metrics can use
+            # the handles without re-initializing every time. Shutdown happens only in shutdown().
             self.gpu_indices = []
             if NVML_AVAILABLE:
                 try:
@@ -425,6 +428,16 @@ class TelemetryService:
                 except Exception as e:
                     bt.logging.warning(f"Could not populate GPU indices for periodic metrics (pynvml): {e}")
                     self.gpu_indices = []
+
+            # Long-lived init for periodic GPU metrics (init once, shutdown only on service exit)
+            if self.gpu_indices and not self._pynvml_initialized:
+                try:
+                    nvmlInit()
+                    self._pynvml_initialized = True
+                except Exception as e:
+                    bt.logging.warning(f"Failed to keep pynvml initialized for periodic GPU metrics: {e}")
+                    self.gpu_indices = []
+                    self._pynvml_initialized = False
         except Exception as e:
             bt.logging.warning(f"Startup metrics recording failed: {e}")
 
@@ -445,15 +458,18 @@ class TelemetryService:
             except Exception as disk_err:
                 bt.logging.debug(f"Could not read disk usage for telemetry: {disk_err}")
 
-            # GPU metrics
-            if self.gpu_indices:
-                for i in self.gpu_indices:
-                    handle = nvmlDeviceGetHandleByIndex(i)
-                    util = nvmlDeviceGetUtilizationRates(handle).gpu
-                    mem_info = nvmlDeviceGetMemoryInfo(handle)
-                    mem_usage = (mem_info.used / mem_info.total) * 100
-                    self._enqueue_datapoint("system_gpu_utilization", timestamp, util, attributes={"gpu_index": i})
-                    self._enqueue_datapoint("system_gpu_memory_usage", timestamp, mem_usage, attributes={"gpu_index": i})
+            # GPU metrics (pynvml kept initialized for the lifetime of the service)
+            if self.gpu_indices and self._pynvml_initialized:
+                try:
+                    for i in self.gpu_indices:
+                        handle = nvmlDeviceGetHandleByIndex(i)
+                        util = nvmlDeviceGetUtilizationRates(handle).gpu
+                        mem_info = nvmlDeviceGetMemoryInfo(handle)
+                        mem_usage = (mem_info.used / mem_info.total) * 100
+                        self._enqueue_datapoint("system_gpu_utilization", timestamp, util, attributes={"gpu_index": i})
+                        self._enqueue_datapoint("system_gpu_memory_usage", timestamp, mem_usage, attributes={"gpu_index": i})
+                except Exception as gpu_err:
+                    bt.logging.debug(f"Periodic GPU metrics pynvml query failed: {gpu_err}")
 
             bt.logging.info("System metrics sent")
         except Exception as e:
@@ -500,6 +516,14 @@ class TelemetryService:
                     break
             if batch:
                 self._flush_batch(batch)
+
+            # Shutdown pynvml if we initialized it for long-lived GPU metrics
+            if getattr(self, '_pynvml_initialized', False):
+                try:
+                    nvmlShutdown()
+                except Exception:
+                    pass
+                self._pynvml_initialized = False
 
             bt.logging.info("Metrics service shutdown complete. ✅")
         except Exception as e:
