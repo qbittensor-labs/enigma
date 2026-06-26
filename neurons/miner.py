@@ -34,6 +34,7 @@ from qbittensor.utils.time import timestamp_str
 from qbittensor.protocol import SolutionSynapse
 from qbittensor.cli.miner.utils.constants import MINER_DB_TABLE_PREFIX
 from qbittensor.utils.transfer_proof import build_transfer_proof_message
+from qbittensor.utils.trusted_validators import TrustedValidatorChecker
 
 
 class Miner(BaseMinerNeuron):
@@ -55,6 +56,20 @@ class Miner(BaseMinerNeuron):
         self.db_query: DBQueryMiner = db_conn.db_query_miner
         bt.logging.info(f"🗄️  Miner using DB: {db_conn.DB_PATH}")
         self.solution_poller: SolutionPoller = SolutionPoller(db_query=self.db_query)
+
+        # Trusted validator allowlist (hardcoded list + optional CLI override).
+        # We only offer submissions to hotkeys in this list (unless disabled).
+        self.trusted_checker: TrustedValidatorChecker | None = None
+        treasury_cfg = getattr(self.config, "treasury", None)
+        disable_check = getattr(treasury_cfg, "disable_whitelist_check", False) if treasury_cfg is not None else False
+
+        if not disable_check:
+            override = getattr(treasury_cfg, "trusted_hotkeys", None) if treasury_cfg is not None else None
+            self.trusted_checker = TrustedValidatorChecker(trusted_hotkeys=override)
+            bt.logging.info("🔐 Trusted validator allowlist gating is ENABLED")
+        else:
+            self.trusted_checker = TrustedValidatorChecker(disable=True)
+            bt.logging.warning("⚠️  Trusted validator allowlist gating is DISABLED (--treasury.disable_whitelist_check)")
 
     async def forward(self, synapse: SolutionSynapse) -> SolutionSynapse:
         """Processes an incoming SolutionSynapse from a validator.
@@ -91,6 +106,14 @@ class Miner(BaseMinerNeuron):
             bt.logging.info(
                 "ℹ️ Validator reported busy (max concurrent solutions); still offering solution."
             )
+
+        # Non-listed validators can still report statuses, but will not receive new solution candidates.
+        if self.trusted_checker is not None and not self.trusted_checker.is_trusted(validator_hotkey):
+            bt.logging.info(
+                f"⛔ Validator {validator_hotkey} is not on the trusted allowlist. "
+                "Not offering submission."
+            )
+            return synapse
 
         miner_submission: MinerSubmission | None = self.solution_poller.poll_for_validator(validator_hotkey)
 
@@ -162,6 +185,9 @@ class Miner(BaseMinerNeuron):
         - Must have a valid dendrite + hotkey
         - Hotkey must be registered in the metagraph
         - Validator must have sufficient stake (currently >= 0.0, effectively any staked validator)
+
+        Note: The trusted validator allowlist is enforced in forward(), not here.
+        This allows non-listed validators to still report submission statuses back to the miner.
         """
 
         # Check if synapse hotkey is in the metagraph
@@ -206,6 +232,8 @@ class Miner(BaseMinerNeuron):
     def resync_metagraph(self):
         """Resync metagraph without emitting the base class info log."""
         self.metagraph.sync(subtensor=self.subtensor)
+        if self.trusted_checker is not None:
+            self.trusted_checker.refresh()  # no-op for hardcoded allowlist
 
     def save_state(self):
         """No-op.
