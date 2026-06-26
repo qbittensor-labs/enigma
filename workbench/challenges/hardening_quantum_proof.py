@@ -27,7 +27,7 @@ SAMPLES_DIR = Path(__file__).resolve().parent / "hardening_quantum_proof" / "sam
 def list_samples(difficulty: int | None = None):
     """List available sample circuits, optionally filtered by difficulty.
 
-    Returns list of dicts with id, qubit_count, difficulty_type, difficulty.
+    Returns list of dicts with id, qubit_count, difficulty.
     """
     samples = []
     for meta_file in sorted(SAMPLES_DIR.glob("*_meta.json")):
@@ -40,7 +40,6 @@ def list_samples(difficulty: int | None = None):
         samples.append({
             "id": circuit_id,
             "qubit_count": len(meta["peaked_state"]),
-            "difficulty_type": meta.get("metadata", {}).get("type", "unknown"),
             "difficulty": d,
         })
     return samples
