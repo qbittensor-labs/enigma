@@ -467,5 +467,5 @@ def samples(difficulty):
     click.echo(f"\n{'ID':<24} {'Diff':<6} {'Qubits':<8} {'Type'}")
     click.echo("-" * 60)
     for s in sample_list:
-        click.echo(f"{s['id']:<24} {s['difficulty']:<6} {s['qubit_count']:<8} {s['difficulty_type']}")
+        click.echo(f"{s['id']:<24} {s['difficulty']:<6} {s['qubit_count']:<8}")
     click.echo()
