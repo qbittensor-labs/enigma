@@ -84,7 +84,8 @@ A submission follows this flow:
 2. **Serving (running miner neuron)**  
    `neurons/miner.py` continuously polls the local DB via `SolutionPoller`.  
    - It prefers rows that have never been served to any validator (`submitted_at IS NULL`).  
-   - Once served to a validator, it sets `submitted_at` (the row moves down the priority queue but remains eligible to be served to *other* validators).  
+   - A submission is only offered to a validator if its hotkey is present in the **trusted validator allowlist** (see section below).  
+   - Once served to a validator, it sets `submitted_at` (the row moves down the priority queue but remains eligible to be served to *other* trusted validators).  
    - Every time the solution is returned in a synapse, the miner attaches a fresh signature over the transfer proof data.
 
 3. **Validator claim & execution**  
@@ -101,7 +102,8 @@ A submission follows this flow:
 
 1. Read validator hotkey from `synapse.dendrite.hotkey`.
 2. Record any `submission_statuses` the validator sent back (for maintenance incentive tracking).
-3. Query local DB for next row not yet sent to this validator (`get_next_miner_submission_for_validator`).
+3. If the validator is not on the trusted allowlist, return early without a candidate.
+4. Query local DB for next row not yet sent to this validator (`get_next_miner_submission_for_validator`).
    - We offer a solution even if the validator reports `validator_busy=True`. This allows the validator to claim the work on the platform (for the miner's maintenance incentive) even while at capacity. The validator will submit with `validator_busy=True`; the platform will re-offer the work later via `/submissions/next` instead of the validator running it immediately.
 4. Convert DB row -> `SolutionCandidate`.
 5. Build transfer proof message and sign it with miner hotkey.
@@ -118,6 +120,62 @@ A submission follows this flow:
 
 On validator side, `ResponseProcessor` verifies transfer proof data (message integrity, signature, hotkey/coldkey ownership, transfer destination/amount, and on-chain extrinsic inclusion) before accepting the candidate.
 
+## Trusted Validator Allowlist
+
+The miner gates which validators receive solution submissions according to a **trusted validator allowlist**.
+
+### Purpose
+
+Only offer work to validators that are present in the on-chain Treasury Governor's trusted validator whitelist. Validators not on this list cannot meaningfully participate in governance (e.g. voting on payout proposals), so the miner avoids sending them candidate solutions.
+
+- Trusted validators **will** receive `solution_candidate` data when they query the miner.
+- Non-trusted validators can still connect and report `submission_statuses` (for maintenance incentive tracking), but will **not** be given new work.
+- If the allowlist is empty (or the check is disabled), the miner conservatively offers submissions to **any** registered validator.
+
+### Current Implementation
+
+Because the TreasuryController contract does not (yet) expose a public view function to read the current `_trustedValidators` set, the allowlist is maintained as a hardcoded list inside the package:
+
+```python
+# qbittensor/utils/trusted_validators.py
+DEFAULT_TRUSTED_HOTKEYS: list[str] = [
+    "5GzjAcUcD3pFk5ybJ1qP4tMfnyk2Kh3SX8R2kMQwPU2dTs63",
+    "5EZ52JMq4S7PYqzmLAggYahyDirMx3p1f1uBtLQgx6fk7kR8",
+]
+```
+
+This list should be updated whenever the on-chain whitelist changes via governance. The values in this file are the defaults shipped with the package.
+
+### Runtime Configuration
+
+Override the default list (comma-separated SS58 hotkeys):
+
+```bash
+python neurons/miner.py \
+  --netuid 63 \
+  --wallet.name ... \
+  --wallet.hotkey ... \
+  --treasury.trusted_hotkeys "5Hotkey1,5Hotkey2,5Hotkey3"
+```
+
+Completely disable the allowlist check:
+
+```bash
+python neurons/miner.py ... --treasury.disable_whitelist_check
+```
+
+On startup the miner logs the number of hotkeys it is currently gating to:
+
+```
+🔐 Miner will only offer submissions to 2 whitelisted validator(s)
+```
+
+### Notes
+
+- The allowlist is evaluated per validator hotkey on every incoming `SolutionSynapse`.
+- The check happens in `forward()` after status reporting but before polling the local DB for a candidate to serve.
+- This mechanism is a stop-gap until a robust on-chain query (or contract view function) is available.
+
 ## End-to-End Operator Workflow
 
 1. Configure `.env`.
@@ -133,4 +191,8 @@ On validator side, `ResponseProcessor` verifies transfer proof data (message int
 python neurons/miner.py --netuid 63 --logging.info --wallet.name <your_wallet_name> --wallet.hotkey <your_hotkey>
 ```
 
-5. As validators query your miner, it serves DB-backed submissions over synapses.
+   Optional flags for the trusted allowlist:
+   - `--treasury.trusted_hotkeys "5Hotkey1,5Hotkey2"`
+   - `--treasury.disable_whitelist_check`
+
+5. As validators query your miner, it serves DB-backed submissions over synapses (only to trusted validators by default).

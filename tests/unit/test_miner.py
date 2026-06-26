@@ -68,6 +68,8 @@ def mock_miner(mock_config):
         patch("neurons.miner.SolutionPoller"),
         patch("qbittensor.utils.transfer_proof.build_transfer_proof_message") as mock_build_proof,
         patch("neurons.miner.build_transfer_proof_message"),
+        patch("qbittensor.utils.trusted_validators.TrustedValidatorChecker"),
+        patch("neurons.miner.TrustedValidatorChecker"),
     ):
 
         # Base objects
@@ -122,6 +124,9 @@ def mock_miner(mock_config):
         miner.solution_poller = mock_poller
         # Ensure the method used by forward() is also available on the live instance
         miner.solution_poller.poll_for_validator = mock_poller.poll_for_validator
+
+        # Disable real allowlist gating in unit tests.
+        miner.trusted_checker = None
 
         # Expose easy access for tests
         miner._mock_wallet = mock_wallet

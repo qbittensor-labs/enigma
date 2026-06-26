@@ -171,6 +171,24 @@ def add_miner_args(cls, parser):
         default=os.environ.get("ENIGMA_DATA_DIR", "data"),
     )
 
+    # Treasury / validator whitelist gating for solution offerings.
+    # We maintain a simple hardcoded allowlist of trusted validator hotkeys
+    # (see qbittensor/utils/trusted_validators.py) because the on-chain contract
+    # does not currently expose the list via a public getter.
+    parser.add_argument(
+        "--treasury.trusted_hotkeys",
+        type=str,
+        default=None,
+        help="Comma-separated list of SS58 hotkeys that should receive submissions. "
+             "Replaces the built-in default list. Example: 5Hotkey1,5Hotkey2",
+    )
+    parser.add_argument(
+        "--treasury.disable_whitelist_check",
+        action="store_true",
+        default=False,
+        help="If set, offer submissions to any registered validator (disables the trusted allowlist).",
+    )
+
     parser.add_argument(
         "--wandb.project_name",
         type=str,
