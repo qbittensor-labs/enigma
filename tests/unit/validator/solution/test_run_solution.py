@@ -50,6 +50,7 @@ from qbittensor.validator.solution.run_solution import (
 )
 from qbittensor.validator.solution.exceptions.invalid_solution import InvalidSolutionError
 from qbittensor.validator.solution.run import clean_up_failed_solution, run_solution_management
+from qbittensor.utils.solution_status import ValidationFailureReason
 
 
 def _build_stdout_with_payload(logs: bytes, payload: bytes, separator_count: int = 1, *, encode: bool = True) -> bytes:
@@ -728,3 +729,173 @@ class TestRunSolutionManagement:
         )
         assert result == (None, None, None)
         mock_cleanup.assert_called_once()
+
+    @patch("qbittensor.validator.solution.run.clean_up_failed_solution")
+    @patch("qbittensor.validator.solution.run.download_zip", return_value=None)
+    @patch("qbittensor.validator.solution.run.setup", return_value=("tag", "/tmp/f"))
+    def test_download_failure_reports_granular_reason_to_platform_and_db(self, _setup, _download, mock_cleanup):
+        db = Mock()
+        db.db_query.has_seen_tx_hash = Mock(return_value=False)
+        db.db_query.create_challenge_solution = Mock(return_value="test-sol-id-789")
+        db.db_query.update_challenge_solution_status_by_id = Mock(return_value=True)
+
+        platform_client = Mock()
+
+        result = run_solution_management(
+            db_conn=db,
+            validator_label="lbl",
+            download_url="url",
+            challenge_milestone_id="m",
+            challenge_validation_solution_id="sol",
+            tx_hash="tx",
+            miner_hotkey="hk",
+            submission_id="sub",
+            challenge_id="challenge-id",
+            platform_client=platform_client,
+        )
+        assert result == (None, None, None)
+
+        # DB status should use granular failure reason
+        db.db_query.update_challenge_solution_status_by_id.assert_called_with(
+            solution_id="test-sol-id-789",
+            solution_status=ValidationFailureReason.ZIP_DOWNLOAD_FAILURE.value,
+        )
+
+        # Platform report should include the granular failure_reason
+        platform_client.report_submission_status.assert_called()
+        call_kwargs = platform_client.report_submission_status.call_args.kwargs
+        assert call_kwargs["failure_reason"] == ValidationFailureReason.ZIP_DOWNLOAD_FAILURE.value
+        assert call_kwargs["status"] == "Failure"
+
+    @patch("qbittensor.validator.solution.run.clean_up_failed_solution")
+    @patch("qbittensor.validator.solution.run.download_zip")
+    @patch("qbittensor.validator.solution.run.validate_zip", return_value=False)
+    @patch("qbittensor.validator.solution.run.setup", return_value=("tag", "/tmp/f"))
+    def test_invalid_zip_reports_granular_reason(self, _setup, _validate, _download, mock_cleanup):
+        db = Mock()
+        db.db_query.has_seen_tx_hash = Mock(return_value=False)
+        db.db_query.create_challenge_solution = Mock(return_value="sol-zip-123")
+        db.db_query.update_challenge_solution_status_by_id = Mock(return_value=True)
+        platform_client = Mock()
+
+        result = run_solution_management(
+            db_conn=db,
+            validator_label="lbl",
+            download_url="url",
+            challenge_milestone_id="m",
+            challenge_validation_solution_id="sol",
+            tx_hash="tx",
+            miner_hotkey="hk",
+            submission_id="sub",
+            challenge_id="challenge-id",
+            platform_client=platform_client,
+        )
+        assert result == (None, None, None)
+        db.db_query.update_challenge_solution_status_by_id.assert_called_with(
+            solution_id="sol-zip-123",
+            solution_status=ValidationFailureReason.INVALID_ZIP.value,
+        )
+        call_kwargs = platform_client.report_submission_status.call_args.kwargs
+        assert call_kwargs["failure_reason"] == ValidationFailureReason.INVALID_ZIP.value
+
+    @patch("qbittensor.validator.solution.run.clean_up_failed_solution")
+    @patch("qbittensor.validator.solution.run.download_zip")
+    @patch("qbittensor.validator.solution.run.setup", return_value=("tag", "/tmp/f"))
+    def test_unexpected_exception_falls_back_to_internal_failure(self, _setup, _download, mock_cleanup):
+        db = Mock()
+        db.db_query.has_seen_tx_hash = Mock(return_value=False)
+        db.db_query.create_challenge_solution = Mock(return_value="sol-internal")
+        db.db_query.update_challenge_solution_status_by_id = Mock(return_value=True)
+        platform_client = Mock()
+
+        # Simulate an error that doesn't carry failure_reason (e.g. from deeper unexpected path)
+        def bad_download(*a, **k):
+            raise InvalidSolutionError("something weird happened")
+
+        with patch("qbittensor.validator.solution.run.download_zip", side_effect=bad_download):
+            result = run_solution_management(
+                db_conn=db,
+                validator_label="lbl",
+                download_url="url",
+                challenge_milestone_id="m",
+                challenge_validation_solution_id="sol",
+                tx_hash="tx",
+                miner_hotkey="hk",
+                submission_id="sub",
+                challenge_id="challenge-id",
+                platform_client=platform_client,
+            )
+        assert result == (None, None, None)
+        db.db_query.update_challenge_solution_status_by_id.assert_called_with(
+            solution_id="sol-internal",
+            solution_status=ValidationFailureReason.INTERNAL_FAILURE.value,
+        )
+        call_kwargs = platform_client.report_submission_status.call_args.kwargs
+        assert call_kwargs["failure_reason"] == ValidationFailureReason.INTERNAL_FAILURE.value
+
+    @patch("qbittensor.validator.solution.run.clean_up_failed_solution")
+    @patch("qbittensor.validator.solution.run.download_zip")
+    @patch("qbittensor.validator.solution.run.unzip")
+    @patch("qbittensor.validator.solution.run.validate_zip", return_value=True)
+    @patch("qbittensor.validator.solution.run.validate_code", return_value=False)
+    @patch("qbittensor.validator.solution.run.setup", return_value=("tag", "/tmp/f"))
+    def test_invalid_program_reports_granular_reason(self, _setup, _code, _zip, _unzip, _download, mock_cleanup):
+        db = Mock()
+        db.db_query.has_seen_tx_hash = Mock(return_value=False)
+        db.db_query.create_challenge_solution = Mock(return_value="sol-code-456")
+        db.db_query.update_challenge_solution_status_by_id = Mock(return_value=True)
+        platform_client = Mock()
+
+        result = run_solution_management(
+            db_conn=db,
+            validator_label="lbl",
+            download_url="url",
+            challenge_milestone_id="m",
+            challenge_validation_solution_id="sol",
+            tx_hash="tx",
+            miner_hotkey="hk",
+            submission_id="sub",
+            challenge_id="challenge-id",
+            platform_client=platform_client,
+        )
+        assert result == (None, None, None)
+        db.db_query.update_challenge_solution_status_by_id.assert_called_with(
+            solution_id="sol-code-456",
+            solution_status=ValidationFailureReason.INVALID_PROGRAM.value,
+        )
+        call_kwargs = platform_client.report_submission_status.call_args.kwargs
+        assert call_kwargs["failure_reason"] == ValidationFailureReason.INVALID_PROGRAM.value
+
+    @patch("qbittensor.validator.solution.run.clean_up_failed_solution")
+    @patch("qbittensor.validator.solution.run.download_zip")
+    @patch("qbittensor.validator.solution.run.unzip")
+    @patch("qbittensor.validator.solution.run.validate_zip", return_value=True)
+    @patch("qbittensor.validator.solution.run.validate_code", return_value=True)
+    @patch("qbittensor.validator.solution.run.reject_dockerfile", return_value=False)
+    @patch("qbittensor.validator.solution.run.setup", return_value=("tag", "/tmp/f"))
+    def test_policy_violation_reports_granular_reason(self, _setup, _reject, _code, _zip, _unzip, _download, mock_cleanup):
+        db = Mock()
+        db.db_query.has_seen_tx_hash = Mock(return_value=False)
+        db.db_query.create_challenge_solution = Mock(return_value="sol-policy")
+        db.db_query.update_challenge_solution_status_by_id = Mock(return_value=True)
+        platform_client = Mock()
+
+        result = run_solution_management(
+            db_conn=db,
+            validator_label="lbl",
+            download_url="url",
+            challenge_milestone_id="m",
+            challenge_validation_solution_id="sol",
+            tx_hash="tx",
+            miner_hotkey="hk",
+            submission_id="sub",
+            challenge_id="challenge-id",
+            platform_client=platform_client,
+        )
+        assert result == (None, None, None)
+        db.db_query.update_challenge_solution_status_by_id.assert_called_with(
+            solution_id="sol-policy",
+            solution_status=ValidationFailureReason.POLICY_VIOLATION.value,
+        )
+        call_kwargs = platform_client.report_submission_status.call_args.kwargs
+        assert call_kwargs["failure_reason"] == ValidationFailureReason.POLICY_VIOLATION.value

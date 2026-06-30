@@ -166,10 +166,12 @@ class TestValidateSolutionCorePaths:
                 challenge_milestone_id="m1",
                 challenge_id="c1",
             )
-            assert status.upper() == "FAILED"
+            # Granular failure reason is now returned as the main status for failures
+            assert status == "IncorrectFailure"
             platform_client.report_submission_status.assert_called_with(
                 "sub1", "Failure",
                 reason="Milestone m1: Output validation failed",
                 log_data_key="log_id",
-                output_data_key="out-id"
+                output_data_key="out-id",
+                failure_reason="IncorrectFailure",
             )

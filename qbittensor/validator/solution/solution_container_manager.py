@@ -35,7 +35,7 @@ from qbittensor.constants import (
     DOCKER_BUILDER_PRUNE_UNTIL,
     DOCKER_IMAGE_PRUNE_UNTIL,
 )
-from qbittensor.utils.solution_status import SolutionStatus
+from qbittensor.utils.solution_status import SolutionStatus, ValidationFailureReason
 import bittensor as bt
 
 from .docker_ops import DockerOps
@@ -731,6 +731,7 @@ class SolutionContainerManager:
         status: str = SolutionStatus.FAILED.value,
         reason: str = "Solution terminated (container lost, overdue, or cleaned up)",
         attempt_extraction: bool = False,
+        failure_reason: str | None = None,
     ) -> None:
         """Ensures that whenever we decide a previously in-flight (RUNNING/PENDING) solution
         is terminal because its container is gone or was deliberately killed, we always:
@@ -769,8 +770,10 @@ class SolutionContainerManager:
                     submission_id=sol.submission_id,
                     status="Failure",
                     reason=reason,
+                    failure_reason=failure_reason,
                 )
-                bt.logging.info(f"📤 Reported Failure to platform for submission {sol.submission_id} (reason: {reason})")
+                fr_note = f" fr={failure_reason}" if failure_reason else ""
+                bt.logging.info(f"📤 Reported Failure to platform for submission {sol.submission_id}{fr_note} (reason: {reason})")
             except Exception as e:
                 bt.logging.warning(f"⚠️ Platform report failed for {sol.submission_id}: {e}")
 
@@ -867,11 +870,13 @@ class SolutionContainerManager:
                 bt.logging.info(f"✅ Removed overdue container {cid}")
 
                 # Delegate to central helper — guarantees local DB + platform report + workspace folder removal
+                wall_status = ValidationFailureReason.WALL_TIME_FAILURE.value
                 self._finalize_solution_terminal(
                     sol,
-                    status=SolutionStatus.FAILED.value,
+                    status=wall_status,
                     reason=f"Validator terminated container as overdue (exceeded max_solution_runtime_seconds={getattr(sol, 'max_solution_runtime_seconds', '?')})",
                     attempt_extraction=False,  # extraction was already attempted above
+                    failure_reason=wall_status,
                 )
             else:
                 bt.logging.warning(f"⚠️ Failed to remove overdue container {cid}")

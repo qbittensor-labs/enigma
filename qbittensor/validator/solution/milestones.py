@@ -25,7 +25,7 @@ from qbittensor.validator.solution.solution_validations.breaking_rsa_solution im
 from qbittensor.validator.solution.challenge_inputs.hqp_setup import hqp_setup
 from qbittensor.validator.solution.solution_validations.hqp_solution import run as run_hqp
 from qbittensor.validator.solution.exceptions.invalid_solution import InvalidSolutionError
-from qbittensor.validator.solution.exceptions.validation_errors import ValidationErrors
+from qbittensor.utils.solution_status import ValidationFailureReason
 
 
 @dataclass(frozen=True)
@@ -100,18 +100,18 @@ def assert_milestone_supported(challenge_id: str) -> None:
     handlers = get_milestone_handlers(challenge_id)
     if not handlers:
         raise InvalidSolutionError(
-            message=ValidationErrors.INVALID_PROGRAM.value,
-            details=f"No handlers registered for challenge_id '{challenge_id}'.",
+            message=ValidationFailureReason.INVALID_PROGRAM.default_message,
+            failure_reason=ValidationFailureReason.INVALID_PROGRAM,
         )
 
     if not handlers.setup:
         raise InvalidSolutionError(
-            message=ValidationErrors.INVALID_PROGRAM.value,
-            details=f"Challenge_id '{challenge_id}' is missing a setup handler.",
+            message=ValidationFailureReason.INVALID_PROGRAM.default_message,
+            failure_reason=ValidationFailureReason.INVALID_PROGRAM,
         )
 
     if not handlers.validate:
         raise InvalidSolutionError(
-            message=ValidationErrors.INVALID_PROGRAM.value,
-            details=f"Challenge_id '{challenge_id}' is missing a validation handler.",
+            message=ValidationFailureReason.INVALID_PROGRAM.default_message,
+            failure_reason=ValidationFailureReason.INVALID_PROGRAM,
         )

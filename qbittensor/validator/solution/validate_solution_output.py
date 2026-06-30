@@ -23,7 +23,7 @@ import requests
 
 import bittensor as bt
 from qbittensor.dto.challenge import ChallengeSubmissionVerifyUploadAddressResponse
-from qbittensor.utils.solution_status import SolutionStatus
+from qbittensor.utils.solution_status import SolutionStatus, ValidationFailureReason
 from qbittensor.challenges.solution_output import SOLUTION_LOG_FILENAME
 from qbittensor.validator.solution.constants import (
     CONTAINER_OUTPUT_DIRNAME,
@@ -184,9 +184,10 @@ def perform_solution_output_validation(
             reason=failure_message,
             log_data_key=report_payload["log_data_key"],
             output_data_key=report_payload["output_data_key"],
+            failure_reason=ValidationFailureReason.INCORRECT_FAILURE.value,
         ):
             bt.logging.info("\t✅ Successfully updated platform with failed validation status")
-            return SolutionStatus.FAILED.value
+            return ValidationFailureReason.INCORRECT_FAILURE.value
         else:
             return SolutionStatus.FAILED_UPLOAD.value
 

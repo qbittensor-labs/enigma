@@ -28,6 +28,7 @@ import pytest
 
 from qbittensor.validator.solution.docker_ops import DockerOps
 from qbittensor.validator.solution.exceptions.invalid_solution import InvalidSolutionError
+from qbittensor.utils.solution_status import ValidationFailureReason
 
 
 class TestDockerOps:
@@ -77,6 +78,7 @@ class TestDockerOpsRun:
         assert "Docker CLI not found" in msg
         assert "docker run test" in msg
         assert "Is Docker installed" in msg
+        assert exc.value.failure_reason == ValidationFailureReason.RUN_FAILURE
 
     def test_called_process_error_127_includes_full_diagnostics(self):
         err = subprocess.CalledProcessError(127, ["docker", "run", "img"])
@@ -95,6 +97,7 @@ class TestDockerOpsRun:
         assert "Command: docker run img" in msg
         assert "Exit code: 127" in msg
         assert "docker: command not found" in msg
+        assert exc.value.failure_reason == ValidationFailureReason.RUN_FAILURE
 
     def test_called_process_error_other_code_includes_stdout_and_stderr(self):
         err = subprocess.CalledProcessError(1, ["docker", "build", "."])
@@ -109,6 +112,7 @@ class TestDockerOpsRun:
         assert "docker build" in msg
         assert "build failed: no space left on device" in msg
         assert "Step 1/3 : FROM python" in msg
+        assert exc.value.failure_reason == ValidationFailureReason.RUN_FAILURE
 
     def test_success_path_does_not_raise(self):
         with patch("subprocess.run") as mock_run:

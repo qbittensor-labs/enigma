@@ -35,6 +35,7 @@ from typing import Optional
 import bittensor as bt
 
 from .exceptions.invalid_solution import InvalidSolutionError
+from qbittensor.utils.solution_status import ValidationFailureReason
 
 
 class DockerOps:
@@ -81,7 +82,10 @@ class DockerOps:
                 "Is Docker installed and properly integrated (especially on WSL)?"
             )
             bt.logging.error(f"❌ {msg} | command={' '.join(cmd)} | {e}")
-            raise InvalidSolutionError(message=msg) from e
+            raise InvalidSolutionError(
+                message=msg,
+                failure_reason=ValidationFailureReason.RUN_FAILURE,
+            ) from e
 
         except subprocess.CalledProcessError as e:
             returncode = e.returncode
@@ -107,12 +111,18 @@ class DockerOps:
                 f"stderr:\n{stderr}\n\n"
                 f"stdout:\n{stdout}"
             )
-            raise InvalidSolutionError(message=platform_msg) from e
+            raise InvalidSolutionError(
+                message=platform_msg,
+                failure_reason=ValidationFailureReason.RUN_FAILURE,
+            ) from e
 
         except subprocess.TimeoutExpired as e:
             bt.logging.error(f"❌ Timeout while running {description}: {' '.join(cmd)}")
             if check:
-                raise InvalidSolutionError(message=f"Timeout running {description}") from e
+                raise InvalidSolutionError(
+                    message=f"Timeout running {description}",
+                    failure_reason=ValidationFailureReason.WALL_TIME_FAILURE,
+                ) from e
             raise
 
     # ------------------------------------------------------------------

@@ -111,6 +111,7 @@ class TestSolutionCrossChecker:
             submission_id=submission.id,
             status="Failure",
             reason="Missing challenge_id for cross-check submission",
+            failure_reason="Unknown",
         )
         # No execute call
         # (mock not set up in this test, but if it were called it would fail since not patched)

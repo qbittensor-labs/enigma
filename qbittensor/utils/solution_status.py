@@ -25,3 +25,41 @@ class SolutionStatus(Enum):
     SUCCESS = "SUCCESS"
     FAILED = "FAILED"
     FAILED_UPLOAD = "FAILED_UPLOAD"
+
+
+class ValidationFailureReason(str, Enum):
+    """Failure reasons."""
+
+    UNKNOWN = "Unknown"
+    WALL_TIME_FAILURE = "WallTimeFailure"
+    INCORRECT_FAILURE = "IncorrectFailure"
+    INVALID_SUBMISSION_FAILURE = "InvalidSubmissionFailure"
+    INTERNAL_FAILURE = "InternalFailure"
+    ZIP_DOWNLOAD_FAILURE = "ZipDownloadFailure"
+    INVALID_ZIP = "InvalidZip"
+    MISSING_DOCKERFILE = "MissingDockerfile"
+    BUILD_FAILURE = "BuildFailure"
+    RUN_FAILURE = "RunFailure"
+    IMAGE_VALIDATION_FAILURE = "ImageValidationFailure"
+    INVALID_PROGRAM = "InvalidProgram"
+    POLICY_VIOLATION = "PolicyViolation"
+
+    @property
+    def default_message(self) -> str:
+        """Human-readable default message for this failure reason."""
+        _messages = {
+            ValidationFailureReason.UNKNOWN: "Unknown validation failure.",
+            ValidationFailureReason.WALL_TIME_FAILURE: "Solution exceeded the allowed runtime (wall time).",
+            ValidationFailureReason.INCORRECT_FAILURE: "Solution produced incorrect output.",
+            ValidationFailureReason.INVALID_SUBMISSION_FAILURE: "The submission was invalid (corrupt, missing files, or otherwise malformed).",
+            ValidationFailureReason.INTERNAL_FAILURE: "An unexpected internal error occurred.",
+            ValidationFailureReason.ZIP_DOWNLOAD_FAILURE: "Failed to download the zip from the provided URL.",
+            ValidationFailureReason.INVALID_ZIP: "The zip is invalid. It may be corrupted or not a zip at all.",
+            ValidationFailureReason.MISSING_DOCKERFILE: "The zip is missing a Dockerfile in the root directory.",
+            ValidationFailureReason.BUILD_FAILURE: "Docker failed to build the image from the provided Dockerfile.",
+            ValidationFailureReason.RUN_FAILURE: "Docker failed to run the container from the built image.",
+            ValidationFailureReason.IMAGE_VALIDATION_FAILURE: "The built Docker image failed validation checks and cannot be run.",
+            ValidationFailureReason.INVALID_PROGRAM: "The program provided in the zip is invalid. It may be missing required files, have syntax errors, or fail other validation checks.",
+            ValidationFailureReason.POLICY_VIOLATION: "Dockerfile failed security policy checks.",
+        }
+        return _messages.get(self, "Validation failed.")

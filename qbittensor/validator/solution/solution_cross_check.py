@@ -23,6 +23,7 @@ from .run import execute_verified_solution
 from qbittensor.constants import CROSS_CHECK_TIMEOUT
 from qbittensor.utils.transfer_proof import verify_transfer_proof_for_synapse
 from qbittensor.utils.services.challenges import ChallengesClient
+from qbittensor.utils.solution_status import ValidationFailureReason
 from qbittensor.utils.services.telemetry import TelemetryService
 import bittensor as bt
 import time
@@ -177,6 +178,7 @@ class SolutionCrossChecker:
                         submission_id=submission.id,
                         status="Failure",
                         reason=proof_err or "Transfer proof verification failed for cross-check submission",
+                        failure_reason=ValidationFailureReason.UNKNOWN.value,
                     )
                     return
                 else:
@@ -191,6 +193,7 @@ class SolutionCrossChecker:
                 submission_id=submission.id,
                 status="Failure",
                 reason=proof_err or "Transfer proof verification failed for cross-check submission (cached result)",
+                failure_reason=ValidationFailureReason.UNKNOWN.value,
             )
             return
 
@@ -213,6 +216,7 @@ class SolutionCrossChecker:
                 submission_id=submission.id,
                 status="Failure",
                 reason="Missing challenge_id for cross-check submission",
+                failure_reason=ValidationFailureReason.UNKNOWN.value,
             )
             return
 

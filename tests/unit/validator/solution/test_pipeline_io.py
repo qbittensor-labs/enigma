@@ -30,6 +30,7 @@ from qbittensor.validator.solution.extract_solution_code import unzip, _flatten_
 from qbittensor.validator.solution.build_docker_image import build_image
 from qbittensor.validator.solution.validate_docker_image import validate_image
 from qbittensor.validator.solution.exceptions.invalid_solution import InvalidSolutionError
+from qbittensor.utils.solution_status import ValidationFailureReason
 
 
 class TestManageFiles:
@@ -134,8 +135,9 @@ class TestExtractSolutionCode:
         folder.mkdir()
         bad = tmp_path / "bad.zip"
         bad.write_text("corrupt")
-        with pytest.raises(InvalidSolutionError):
+        with pytest.raises(InvalidSolutionError) as exc:
             unzip(str(folder), str(bad))
+        assert exc.value.failure_reason == ValidationFailureReason.INVALID_ZIP
 
     def test_unzip_rejects_path_traversal(self, tmp_path):
         """Miner upload zip with lexical traversal must be rejected before any Docker phase."""
@@ -294,6 +296,7 @@ class TestDockerBuildAndValidate:
             assert "Exit code: 1" in msg
             # The rich message now points users at the uploaded build log file
             assert "docker_build.log" in msg or "build output is captured" in msg.lower()
+            assert exc.value.failure_reason == ValidationFailureReason.BUILD_FAILURE
 
     def test_build_image_raises_rich_error_on_docker_not_found(self):
         with patch("subprocess.Popen", side_effect=FileNotFoundError("docker missing")):
@@ -302,6 +305,7 @@ class TestDockerBuildAndValidate:
             msg = str(exc.value)
             assert "Docker CLI not found" in msg
             assert "docker build" in msg.lower() or "build" in msg.lower()
+            assert exc.value.failure_reason == ValidationFailureReason.BUILD_FAILURE
 
     def test_validate_image_exists(self):
         with patch("subprocess.run") as mock_run:

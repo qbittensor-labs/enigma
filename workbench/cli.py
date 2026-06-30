@@ -32,6 +32,13 @@ from workbench.challenges import mock as mock_challenge
 from workbench.runner.docker_runner import (
     check_docker, build_image, run_container, DEFAULT_WALL_TIME,
 )
+
+# Best-effort host NVIDIA/CUDA version for local developer visibility
+# (validators always report this via telemetry; workbench is the local analog).
+try:
+    from qbittensor.utils.services.telemetry import _get_nvidia_driver_info
+except Exception:
+    _get_nvidia_driver_info = None  # type: ignore
 from workbench.runner.direct_runner import find_entry_point, run_direct
 from workbench.validator import validate_output, validate_dockerfile_security
 from workbench.verifier import verify_breaking_rsa, verify_hardening_quantum_proof, verify_mock
@@ -74,6 +81,23 @@ def _preflight_dockerfile(solution: str) -> None:
         sys.exit(1)
 
 
+def _print_nvidia_info_if_available() -> None:
+    """Print host NVIDIA driver + CUDA version (if detectable) for local debugging.
+
+    Useful when testing solutions that use --gpus / CUDA inside their containers.
+    The same data is reported by live validators in telemetry (system_* keys).
+    """
+    if _get_nvidia_driver_info is None:
+        return
+    try:
+        drv, cuda = _get_nvidia_driver_info()
+        if drv != "none" or cuda != "none":
+            click.echo(f"[NVIDIA] driver={drv}  cuda={cuda}")
+        # else: silent on non-GPU machines (normal for most dev)
+    except Exception:
+        pass
+
+
 @click.group()
 def cli():
     """Enigma Developer Workbench -- local testing tool for challenge solutions."""
@@ -104,6 +128,7 @@ def test_breaking_rsa(difficulty, solution, mode, seed, wall_time, allow_network
             click.echo("Error: Docker is not available. Install Docker or use --mode direct.")
             sys.exit(1)
         _preflight_dockerfile(solution)
+        _print_nvidia_info_if_available()
         _warn_non_default(wall_time, allow_network)
 
     # Generate challenge — difficulty is the bit-width
@@ -200,6 +225,7 @@ def test_hardening_quantum_proof(difficulty, solution, mode, circuit, wall_time,
             click.echo("Error: Docker is not available. Install Docker or use --mode direct.")
             sys.exit(1)
         _preflight_dockerfile(solution)
+        _print_nvidia_info_if_available()
         _warn_non_default(wall_time, allow_network)
 
     try:
@@ -304,6 +330,7 @@ def test_mock(difficulty, solution, mode, private_key, public_key, wall_time, al
             click.echo("Error: Docker is not available. Install Docker or use --mode direct.")
             sys.exit(1)
         _preflight_dockerfile(solution)
+        _print_nvidia_info_if_available()
         _warn_non_default(wall_time, allow_network)
 
     # Resolve private key

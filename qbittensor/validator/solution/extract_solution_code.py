@@ -21,7 +21,7 @@ import shutil
 import zipfile
 
 from qbittensor.validator.solution.exceptions.invalid_solution import InvalidSolutionError
-from qbittensor.validator.solution.exceptions.validation_errors import ValidationErrors
+from qbittensor.utils.solution_status import ValidationFailureReason
 from qbittensor.validator.solution.constants import (
     VALIDATOR_ZIP_MAX_UNCOMPRESSED_BYTES_ENV,
     VALIDATOR_ZIP_MAX_UNCOMPRESSED_BYTES_DEFAULT,
@@ -57,7 +57,10 @@ def unzip(folder_name: str, source_filepath: str) -> None:
         bt.logging.info("✅ Code extracted from zip")
     except Exception as e:
         bt.logging.error(f"❌ Failed to unzip the file: {e}")
-        raise InvalidSolutionError(message=str(ValidationErrors.INVALID_ZIP))
+        raise InvalidSolutionError(
+            message=ValidationFailureReason.INVALID_ZIP.default_message,
+            failure_reason=ValidationFailureReason.INVALID_ZIP,
+        )
 
 
 def _flatten_single_top_level_dir(destination: str) -> None:

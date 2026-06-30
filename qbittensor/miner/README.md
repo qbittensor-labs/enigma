@@ -120,6 +120,38 @@ A submission follows this flow:
 
 On validator side, `ResponseProcessor` verifies transfer proof data (message integrity, signature, hotkey/coldkey ownership, transfer destination/amount, and on-chain extrinsic inclusion) before accepting the candidate.
 
+## Validator-Reported Statuses
+
+When a validator processes your submission it sends back one or more `MinerSubmissionStatus` objects (via the `submission_statuses` field in the synapse). These are recorded in your local `miner_submission_statuses` table and are visible in the `mine-enigma` CLI when you list your submissions.
+
+The `status` field is the main result reported by the validator:
+
+### Success
+- `SUCCESS` — The validator successfully built, ran, and validated your solution. The output matched the expected result for the challenge.
+
+### Failure Reasons (Granular)
+
+Validators report specific failure reasons:
+
+| Status                        | Meaning |
+|-------------------------------|---------|
+| `BUILD_FAILURE`               | Docker build failed (bad Dockerfile, missing dependencies, compilation error, etc.) |
+| `RUN_FAILURE`                 | The container started but then failed or crashed during execution |
+| `IMAGE_VALIDATION_FAILURE`    | The built image failed post-build checks (e.g. too large, missing required labels) |
+| `INVALID_PROGRAM`             | The code inside your submission was invalid (syntax errors, missing files, etc.) |
+| `INVALID_ZIP`                 | The uploaded archive was corrupted or not a valid zip |
+| `ZIP_DOWNLOAD_FAILURE`        | The validator could not download your submission from storage |
+| `MISSING_DOCKERFILE`          | No `Dockerfile` was present in the root of the zip |
+| `WALL_TIME_FAILURE`           | Your solution exceeded the maximum allowed runtime for this milestone |
+| `INCORRECT_FAILURE`           | The solution ran to completion but produced the wrong output (failed the challenge validator) |
+| `POLICY_VIOLATION`            | The submission violated a security or runtime policy (e.g. disallowed Dockerfile instructions) |
+| `INVALID_SUBMISSION_FAILURE`  | General "the submission was invalid" (catch-all for early validation problems) |
+| `INTERNAL_FAILURE`            | An unexpected internal error occurred inside the validator |
+| `UNKNOWN`                     | A failure occurred but the validator did not record a more specific reason |
+
+### Miner-Internal Status
+- `OFFERED` — Your miner has served this submission to a particular validator (used for deduplication). This is set locally and is not a validator result.
+
 ## Trusted Validator Allowlist
 
 The miner gates which validators receive solution submissions according to a **trusted validator allowlist**.

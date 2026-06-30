@@ -26,7 +26,8 @@ import zipfile
 import bittensor as bt
 
 from qbittensor.validator.solution.exceptions.invalid_solution import InvalidSolutionError
-from qbittensor.validator.solution.exceptions.validation_errors import ValidationErrors
+from qbittensor.utils.solution_status import ValidationFailureReason
+
 from .docker_ops import DockerOps
 from .solution_context import SolutionExecution
 from qbittensor.challenges.solution_output import (
@@ -570,5 +571,6 @@ def run_image_detached(
         bt.logging.error(f"❌ An unexpected error occurred while starting the container: {e}")
         raise InvalidSolutionError(
             message=f"Unexpected error starting Docker container: {e}. "
-                    "Check validator logs for the full docker command and any additional context."
+                    "Check validator logs for the full docker command and any additional context.",
+            failure_reason=ValidationFailureReason.RUN_FAILURE,
         ) from e

@@ -23,7 +23,8 @@ from pathlib import Path
 
 from .docker_ops import DockerOps
 from qbittensor.validator.solution.exceptions.invalid_solution import InvalidSolutionError
-from qbittensor.validator.solution.exceptions.validation_errors import ValidationErrors
+from qbittensor.utils.solution_status import ValidationFailureReason
+
 
 REJECTED_DOCKERFILE_RULES: tuple[str, ...] = (
     "EXPOSE instructions are not allowed",
@@ -227,7 +228,8 @@ def validate_image(image_name: str) -> bool:
     if not _image_exists(image_name=image_name):
         # _image_exists already logged the reason
         raise InvalidSolutionError(
-            message=ValidationErrors.DOCKER_IMAGE_VALIDATION_FAILED.value
+            message=ValidationFailureReason.IMAGE_VALIDATION_FAILURE.default_message,
+            failure_reason=ValidationFailureReason.IMAGE_VALIDATION_FAILURE,
         )
     bt.logging.info(f"\t✅ Validation for image '{image_name}' successful")
     return True
