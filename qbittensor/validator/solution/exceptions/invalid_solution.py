@@ -15,21 +15,19 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-import qbittensor.validator.solution.exceptions.validation_errors as validation_errors
+from qbittensor.utils.solution_status import ValidationFailureReason
 
 
 class InvalidSolutionError(Exception):
     """Custom exception for invalid solution errors."""
-    container_id: str | None = None
-    image_name: str | None = None
-    challenge_id: str | None = None
-    transaction_id: str | None = None
     error_msg: str | None = None
+    failure_reason: ValidationFailureReason | None = None
 
-    def __init__(self, message: str, container_id: str | None = None, image_name: str | None = None, challenge_id: str | None = None, transaction_id: str | None = None):
+    def __init__(
+        self,
+        message: str,
+        failure_reason: ValidationFailureReason | None = None,
+    ):
         super().__init__(message)
         self.error_msg = message
-        self.container_id = container_id
-        self.image_name = image_name
-        self.challenge_id = challenge_id
-        self.transaction_id = transaction_id
+        self.failure_reason = failure_reason

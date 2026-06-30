@@ -126,3 +126,12 @@ class TestCpuGpuLookupHelpers:
         assert count >= 0
         assert isinstance(models, str)
         assert len(models) > 0
+
+    def test_get_nvidia_driver_info_returns_strings(self):
+        from qbittensor.utils.services.telemetry import _get_nvidia_driver_info
+        driver, cuda = _get_nvidia_driver_info()
+        assert isinstance(driver, str)
+        assert isinstance(cuda, str)
+        # On this machine (no NVIDIA) we expect "none" or a value; either is acceptable.
+        assert len(driver) > 0
+        assert len(cuda) > 0

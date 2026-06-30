@@ -25,6 +25,7 @@ import threading
 import os
 import psutil
 import platform
+import re
 import subprocess
 
 from qbittensor.utils.request.request_manager import RequestManager
@@ -180,6 +181,79 @@ def _get_gpu_info(device: str) -> tuple[int, str]:
         bt.logging.warning(f"nvidia-smi fallback error: {e}")
 
     return 0, "error"
+
+
+def _get_nvidia_driver_info() -> tuple[str, str]:
+    """Return (driver_version, cuda_version) best-effort from the host.
+
+    Primary source: `nvidia-smi` banner line (contains both "Driver Version: X.Y.Z"
+    and "CUDA Version: A.B" -- the latter is the max CUDA runtime the driver supports).
+
+    Fallbacks:
+    - pynvml nvmlSystemGetDriverVersion() for driver only.
+    - Returns ("none", "none") when no NVIDIA stack is present or detectable.
+
+    This is reported via telemetry at startup so we can track what CUDA/driver
+    combinations validators are actually running (required for --gpus passthrough
+    of miner solution containers and for the GPU smoke test).
+    """
+    driver = ""
+    cuda = ""
+
+    # Best signal: the nvidia-smi banner (works even without per-gpu queries)
+    try:
+        result = subprocess.run(
+            ["nvidia-smi"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout:
+            for line in result.stdout.splitlines():
+                if "Driver Version" in line and "CUDA Version" in line:
+                    dm = re.search(r"Driver Version:\s*([0-9.]+)", line)
+                    cm = re.search(r"CUDA Version:\s*([0-9.]+)", line)
+                    if dm:
+                        driver = dm.group(1)
+                    if cm:
+                        cuda = cm.group(1)
+                    break
+            # Secondary: explicit driver query (some nvidia-smi builds vary in banner)
+            if not driver:
+                qres = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if qres.returncode == 0:
+                    lines = [line.strip() for line in (qres.stdout or "").strip().splitlines() if line.strip()]
+                    if lines:
+                        driver = lines[0]
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        bt.logging.debug(f"nvidia-smi version parse error: {e}")
+
+    # pynvml driver fallback (no CUDA version from pynvml AFAIK)
+    if not driver and NVML_AVAILABLE:
+        try:
+            nvmlInit()
+            try:
+                drv = nvmlSystemGetDriverVersion()
+                if isinstance(drv, (bytes, bytearray)):
+                    driver = drv.decode("utf-8", errors="ignore").strip()
+                elif drv:
+                    driver = str(drv).strip()
+            finally:
+                try:
+                    nvmlShutdown()
+                except Exception:
+                    pass
+        except Exception as e:
+            bt.logging.debug(f"pynvml driver version query failed: {e}")
+
+    return (driver or "none"), (cuda or "none")
 
 
 class TelemetryService:
@@ -377,7 +451,7 @@ class TelemetryService:
             bt.logging.info(f"Failed to enqueue heartbeat: {e}")
 
     def record_startup_metrics(self):
-        """Record startup system metrics (CPU family, max CPUs, max RAM, GPU count/models)."""
+        """Record startup system metrics (CPU family, max CPUs, max RAM, GPU count/models, NVIDIA driver/CUDA version)."""
         try:
             timestamp = datetime.now(timezone.utc).isoformat()
 
@@ -401,6 +475,12 @@ class TelemetryService:
             gpu_count, gpu_models = _get_gpu_info(self.device)
             self._enqueue_datapoint("system_gpu_count", timestamp, gpu_count)
             self._enqueue_datapoint("system_gpu_models", timestamp, gpu_models)
+
+            # NVIDIA driver + CUDA version (critical for GPU passthrough compatibility
+            # on validators; "none"/"none" when no NVIDIA present).
+            driver_ver, cuda_ver = _get_nvidia_driver_info()
+            self._enqueue_datapoint("system_gpu_driver_version", timestamp, driver_ver)
+            self._enqueue_datapoint("system_cuda_version", timestamp, cuda_ver)
 
             # Store GPU indices *only* for periodic metrics (which require live pynvml handles).
             # We do a temporary init/shutdown (like _get_gpu_info) to discover devices,

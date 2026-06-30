@@ -22,8 +22,6 @@ import subprocess
 import time
 from typing import Optional, Tuple
 
-from .exceptions.validation_errors import ValidationErrors
-
 from qbittensor.validator.solution.challenge_inputs.challenge_setups import run_challenge_setup
 from .milestones import assert_milestone_supported
 from qbittensor.validator.solution.exceptions.invalid_solution import InvalidSolutionError
@@ -43,7 +41,7 @@ from .validate_solution_output import (
 from .docker_ops import DockerOps
 from .validate_docker_image import reject_dockerfile, validate_image
 from .run_solution import prepare_challenge_input_mount_dir, run_image_detached
-from qbittensor.utils.solution_status import SolutionStatus
+from qbittensor.utils.solution_status import SolutionStatus, ValidationFailureReason
 from qbittensor.utils.services.challenges import ChallengesClient
 from qbittensor.utils.services.telemetry import TelemetryService
 from .solution_context import SolutionExecution
@@ -135,14 +133,20 @@ def run_solution_management(
         local_filepath = download_zip(url=download_url, folder_name=folder_path)
         if local_filepath is None:
             bt.logging.error("Failed to download zip file.")
-            raise InvalidSolutionError(message=ValidationErrors.ZIP_DOWNLOAD_FAILED.value)
+            raise InvalidSolutionError(
+                message=ValidationFailureReason.ZIP_DOWNLOAD_FAILURE.default_message,
+                failure_reason=ValidationFailureReason.ZIP_DOWNLOAD_FAILURE,
+            )
 
         # Validate zip
         bt.logging.info("Validating zip...")
         valid_zipfile = validate_zip(local_filepath)
         if not valid_zipfile:
             bt.logging.error("Zip validation failed.")
-            raise InvalidSolutionError(message=ValidationErrors.INVALID_ZIP.value)
+            raise InvalidSolutionError(
+                message=ValidationFailureReason.INVALID_ZIP.default_message,
+                failure_reason=ValidationFailureReason.INVALID_ZIP,
+            )
 
         # Extract code from zip
         bt.logging.info("Extracting code from zip...")
@@ -153,13 +157,19 @@ def run_solution_management(
         code_is_valid = validate_code(folder_name=folder_path)
         if not code_is_valid:
             bt.logging.error("Code validation failed.")
-            raise InvalidSolutionError(message=ValidationErrors.INVALID_PROGRAM.value)
+            raise InvalidSolutionError(
+                message=ValidationFailureReason.INVALID_PROGRAM.default_message,
+                failure_reason=ValidationFailureReason.INVALID_PROGRAM,
+            )
 
         # Validate Dockerfile security policy
         bt.logging.info("Validating Dockerfile policy...")
         if not reject_dockerfile(folder_name=folder_path):
             bt.logging.error("Dockerfile policy validation failed.")
-            raise InvalidSolutionError(message=ValidationErrors.INVALID_PROGRAM.value)
+            raise InvalidSolutionError(
+                message=ValidationFailureReason.POLICY_VIOLATION.default_message,
+                failure_reason=ValidationFailureReason.POLICY_VIOLATION,
+            )
 
         # Ensure the per-solution output directory exists early so that docker build
         # logs (and later container stdout logs) can be written here and picked up
@@ -218,7 +228,10 @@ def run_solution_management(
             solution_status=SolutionStatus.RUNNING.value,
         ):
             bt.logging.error("Failed to update challenge solution.")
-            raise InvalidSolutionError(message=ValidationErrors.DOCKER_RUN_FAILED.value)
+            raise InvalidSolutionError(
+                message=ValidationFailureReason.RUN_FAILURE.default_message,
+                failure_reason=ValidationFailureReason.RUN_FAILURE,
+            )
         did_start_solution = True
         bt.logging.info(f"✅ run_solution_management completed setup for {challenge_validation_solution_id}")
 
@@ -232,9 +245,10 @@ def run_solution_management(
 
         if did_insert_solution and not did_start_solution and execution is not None:
             # We constructed the SolutionExecution (with stable id) only on successful create.
+            fr = e.failure_reason or ValidationFailureReason.INTERNAL_FAILURE  # unclassified / unexpected error
             db_conn.db_query.update_challenge_solution_status_by_id(
                 solution_id=execution.solution_id,
-                solution_status=SolutionStatus.FAILED.value,
+                solution_status=fr.value,
             )
 
         log_data_key: str | None = None
@@ -272,11 +286,13 @@ def run_solution_management(
                 f"📤 Reporting Failure to platform (submission_id={sub_for_report}) "
                 f"with log_data_key={'present' if log_data_key else 'None'}"
             )
+            fr = e.failure_reason or ValidationFailureReason.INTERNAL_FAILURE  # unclassified / unexpected error
             platform_client.report_submission_status(
                 submission_id=sub_for_report,
                 status="Failure",
                 reason=rich_reason[:2000],  # keep platform messages reasonable length
                 log_data_key=log_data_key,
+                failure_reason=fr.value,
             )
         else:
             bt.logging.warning("No platform_client provided — could not report failure status to platform")
@@ -333,10 +349,10 @@ def clean_up_failed_solution(image_name: str | None, container_id: str | None, f
     if total > 0:
         bt.logging.info(f"🧹 Failed solution cleanup complete: {cleaned}/{total} items removed")
 
-
 # =============================================================================
 # Shared Execution Entry Point (Normal + Cross-check paths)
 # =============================================================================
+
 
 def execute_verified_solution(
     db_conn: DBConnection,
@@ -370,7 +386,6 @@ def execute_verified_solution(
 
     The handler (setup for challenge inputs + output validation) is looked up
     by challenge_id (see MILESTONE_REGISTRY).
-
 
     On failure it reports via report_submission_status (including keys if provided).
     On success, the caller is responsible for any final Success report (with keys if applicable).
@@ -412,6 +427,7 @@ def execute_verified_solution(
                 submission_id=submission_id,
                 status="Failure",
                 reason="Milestone is missing required max_solution_runtime configuration; validator cannot enforce timeout.",
+                failure_reason=ValidationFailureReason.UNKNOWN.value,
             )
         else:
             bt.logging.warning("No platform_client provided — could not report failure for missing max_solution_runtime")
@@ -487,6 +503,7 @@ def execute_verified_solution(
                 reason="Execution pipeline failed before container could produce output. Check validator logs around the submission timestamp for details (download/build/start phase).",
                 log_data_key=log_data_key,
                 output_data_key=output_data_key,
+                failure_reason=ValidationFailureReason.UNKNOWN.value,
             )
         return None, None, None
 

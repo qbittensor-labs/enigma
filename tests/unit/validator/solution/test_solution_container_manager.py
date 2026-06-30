@@ -423,7 +423,7 @@ class TestOrphanedAndLocationHandling:
 
 from types import SimpleNamespace
 
-from qbittensor.utils.solution_status import SolutionStatus
+from qbittensor.utils.solution_status import SolutionStatus, ValidationFailureReason
 
 
 class TestStartupRecovery:
@@ -662,6 +662,7 @@ class TestOverdueContainersUpdated:
             args, kwargs = mock_finalize.call_args
             assert args[0] is fake_sol
             assert "overdue" in kwargs.get("reason", "").lower()
+            assert kwargs.get("failure_reason") == ValidationFailureReason.WALL_TIME_FAILURE.value
 
 
 # Extend recovery test to assert platform report via helper (the previous test already checks DB)

@@ -27,7 +27,7 @@ from qbittensor.validator.solution.constants import (
     CONTAINER_SOLUTION_DIRNAME,
 )
 from qbittensor.validator.solution.exceptions.invalid_solution import InvalidSolutionError
-from qbittensor.validator.solution.exceptions.validation_errors import ValidationErrors
+from qbittensor.utils.solution_status import ValidationFailureReason
 
 
 class TestConstants:
@@ -37,24 +37,12 @@ class TestConstants:
         assert CONTAINER_SOLUTION_DIRNAME == "solution_artifacts"
 
 
-class TestValidationErrors:
-    def test_enum_members_exist(self):
-        assert ValidationErrors.INVALID_ZIP.value
-        assert ValidationErrors.DOCKER_RUN_FAILED.value
-
-
 class TestInvalidSolutionError:
-    def test_stores_optional_fields(self):
+    def test_stores_fields(self):
         err = InvalidSolutionError(
             "failed",
-            container_id="cid",
-            image_name="img",
-            challenge_id="ch",
-            transaction_id="tx",
+            failure_reason=ValidationFailureReason.BUILD_FAILURE,
         )
         assert str(err) == "failed"
         assert err.error_msg == "failed"
-        assert err.container_id == "cid"
-        assert err.image_name == "img"
-        assert err.challenge_id == "ch"
-        assert err.transaction_id == "tx"
+        assert err.failure_reason == ValidationFailureReason.BUILD_FAILURE

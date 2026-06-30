@@ -345,6 +345,7 @@ class ChallengesClient:
         reason: Optional[str] = None,
         log_data_key: Optional[str] = None,
         output_data_key: Optional[str] = None,
+        failure_reason: Optional[str] = None,
     ) -> bool:
         if not self.request_manager:
             raise RuntimeError("report_submission_status requires an authenticated ChallengesClient")
@@ -356,6 +357,8 @@ class ChallengesClient:
             payload["log_data_key"] = log_data_key
         if output_data_key:
             payload["output_data_key"] = output_data_key
+        if failure_reason:
+            payload["failure_reason"] = failure_reason
 
         try:
             resp = self._request(
@@ -369,7 +372,8 @@ class ChallengesClient:
             return False
 
         if resp.status_code == 200:
-            bt.logging.info(f"✅ Reported submission {submission_id} as {status}")
+            fr_note = f" failure_reason={failure_reason}" if failure_reason else ""
+            bt.logging.info(f"✅ Reported submission {submission_id} as {status}{fr_note}")
             return True
         else:
             self._log_error_response("report_submission_status", resp)

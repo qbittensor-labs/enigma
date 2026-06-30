@@ -26,7 +26,7 @@ from qbittensor.validator.solution.constants import (
     MAX_SOLUTION_DOCKER_IMAGE_SIZE_BYTES,
 )
 from qbittensor.validator.solution.exceptions.invalid_solution import InvalidSolutionError
-from qbittensor.validator.solution.exceptions.validation_errors import ValidationErrors
+from qbittensor.utils.solution_status import ValidationFailureReason
 from .docker_ops import DockerOps
 
 
@@ -127,7 +127,8 @@ def build_image(image_name: str, dockerfile_dir: str = ".", build_log_path: Opti
             _delete_image(image_name)
             raise InvalidSolutionError(
                 message="Docker build appeared to succeed, but we could not inspect the resulting image size. "
-                        "This usually means the Docker CLI became unavailable or the image was immediately removed."
+                        "This usually means the Docker CLI became unavailable or the image was immediately removed.",
+                failure_reason=ValidationFailureReason.IMAGE_VALIDATION_FAILURE,
             )
 
         if size_bytes > MAX_SOLUTION_DOCKER_IMAGE_SIZE_BYTES:
@@ -137,7 +138,8 @@ def build_image(image_name: str, dockerfile_dir: str = ".", build_log_path: Opti
             )
             _delete_image(image_name)
             raise InvalidSolutionError(
-                message=f"Built image exceeds maximum allowed size ({size_bytes} > {MAX_SOLUTION_DOCKER_IMAGE_SIZE_BYTES} bytes)."
+                message=f"Built image exceeds maximum allowed size ({size_bytes} > {MAX_SOLUTION_DOCKER_IMAGE_SIZE_BYTES} bytes).",
+                failure_reason=ValidationFailureReason.IMAGE_VALIDATION_FAILURE,
             )
 
         bt.logging.info(
@@ -165,7 +167,10 @@ def build_image(image_name: str, dockerfile_dir: str = ".", build_log_path: Opti
             f"Full build output is captured in {DOCKER_BUILD_LOG_FILENAME} (uploaded with this submission for diagnostics).\n\n"
             f"Last output:\n{stdout[-4000:] if len(stdout) > 4000 else stdout}"
         )
-        raise InvalidSolutionError(message=platform_msg) from e
+        raise InvalidSolutionError(
+            message=platform_msg,
+            failure_reason=ValidationFailureReason.BUILD_FAILURE,
+        ) from e
 
     except FileNotFoundError as e:
         msg = (
@@ -174,16 +179,22 @@ def build_image(image_name: str, dockerfile_dir: str = ".", build_log_path: Opti
             "Is Docker installed and properly integrated (especially on WSL)?"
         )
         bt.logging.error(f"❌ {msg} | command={' '.join(build_cmd)} | {e}")
-        raise InvalidSolutionError(message=msg) from e
+        raise InvalidSolutionError(
+            message=msg,
+            failure_reason=ValidationFailureReason.BUILD_FAILURE,
+        ) from e
 
     except InvalidSolutionError:
-        # Size / inspect errors etc. — already proper
+        # Size / inspect errors etc. — already have specific failure_reason
         raise
 
     except Exception as e:
         msg = f"Unexpected error while building Docker image: {e}"
         bt.logging.error(f"\t❌ {msg}")
-        raise InvalidSolutionError(message=msg) from e
+        raise InvalidSolutionError(
+            message=msg,
+            failure_reason=ValidationFailureReason.INTERNAL_FAILURE,
+        ) from e
 
 
 def _write_build_log(
