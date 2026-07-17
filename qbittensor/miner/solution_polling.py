@@ -32,8 +32,8 @@ class SolutionPoller:
 
     def poll_for_validator(self, validator_hotkey: str) -> MinerSubmission | None:
         """
-        Return the next submission that has not yet been offered to this specific validator.
-        This enables proper per-validator deduplication.
+        Return the next submission that this validator has not yet claimed.
+        We keep offering until the validator reports a real status (e.g. Pending or result).
         """
-        bt.logging.info(f"🔊 Polling for a solution candidate not yet offered to {validator_hotkey[:8]}...")
+        bt.logging.info(f"🔊 Polling for a solution candidate not yet claimed by {validator_hotkey[:8]}...")
         return self.db_query.get_next_miner_submission_for_validator(validator_hotkey)

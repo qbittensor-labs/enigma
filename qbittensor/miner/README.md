@@ -116,7 +116,7 @@ A submission follows this flow:
    - `transfer_amount_rao`
    - `transfer_proof_message`
    - `transfer_proof_signature_hex`
-7. Mark row submitted for that validator (via OFFERED status) so the same validator does not get duplicate delivery through the normal direct query path. (Platform cross-check re-offers are a separate mechanism.)
+7. Mark row submitted for that validator (via "Submitted" status for visibility) — but only on the *first* offer to that validator for this tx. We continue re-offering on future polls until the validator actually claims it and reports back a real status (e.g. "Pending", "Success", or a failure reason). "Submitted" alone does not block re-offers. This improves recoverability if claims fail or the validator was busy. (Platform cross-check re-offers are a separate mechanism.)
 
 On validator side, `ResponseProcessor` verifies transfer proof data (message integrity, signature, hotkey/coldkey ownership, transfer destination/amount, and on-chain extrinsic inclusion) before accepting the candidate.
 
@@ -127,30 +127,40 @@ When a validator processes your submission it sends back one or more `MinerSubmi
 The `status` field is the main result reported by the validator:
 
 ### Success
-- `SUCCESS` — The validator successfully built, ran, and validated your solution. The output matched the expected result for the challenge.
+- `Success` — The validator successfully built, ran, and validated your solution. The output matched the expected result for the challenge.
 
-### Failure Reasons (Granular)
+### Lifecycle States
+- `Pending` — The validator has received the submission and is preparing to execute it (e.g., downloading, building).
+- `Running` — The validator is currently executing the solution in a container.
 
-Validators report specific failure reasons:
+These are reported by the validator (as part of the current solution state) so the miner can see in-progress work.
+
+### Failure Reasons
+
+Validators report specific failure reasons. These are the **actual strings** you will see in the `status` field:
+
+A generic `Failure` may still appear in some terminal/lost-container cases.
 
 | Status                        | Meaning |
 |-------------------------------|---------|
-| `BUILD_FAILURE`               | Docker build failed (bad Dockerfile, missing dependencies, compilation error, etc.) |
-| `RUN_FAILURE`                 | The container started but then failed or crashed during execution |
-| `IMAGE_VALIDATION_FAILURE`    | The built image failed post-build checks (e.g. too large, missing required labels) |
-| `INVALID_PROGRAM`             | The code inside your submission was invalid (syntax errors, missing files, etc.) |
-| `INVALID_ZIP`                 | The uploaded archive was corrupted or not a valid zip |
-| `ZIP_DOWNLOAD_FAILURE`        | The validator could not download your submission from storage |
-| `MISSING_DOCKERFILE`          | No `Dockerfile` was present in the root of the zip |
-| `WALL_TIME_FAILURE`           | Your solution exceeded the maximum allowed runtime for this milestone |
-| `INCORRECT_FAILURE`           | The solution ran to completion but produced the wrong output (failed the challenge validator) |
-| `POLICY_VIOLATION`            | The submission violated a security or runtime policy (e.g. disallowed Dockerfile instructions) |
-| `INVALID_SUBMISSION_FAILURE`  | General "the submission was invalid" (catch-all for early validation problems) |
-| `INTERNAL_FAILURE`            | An unexpected internal error occurred inside the validator |
-| `UNKNOWN`                     | A failure occurred but the validator did not record a more specific reason |
+| `Failure`                     | Generic failure (used in some recovery/terminal cases) |
+| `UploadFailure`               | Failed to establish upload locations for validator logs or solution output during validation |
+| `BuildFailure`                | Docker build failed (bad Dockerfile, missing dependencies, compilation error, etc.) |
+| `RunFailure`                  | The container started but then failed or crashed during execution |
+| `ImageValidationFailure`      | The built image failed post-build checks (e.g. too large, missing required labels) |
+| `InvalidProgram`              | The code inside your submission was invalid (syntax errors, missing files, etc.) |
+| `InvalidZip`                  | The uploaded archive was corrupted or not a valid zip |
+| `ZipDownloadFailure`          | The validator could not download your submission from storage |
+| `MissingDockerfile`           | No `Dockerfile` was present in the root of the zip |
+| `WallTimeFailure`             | Your solution exceeded the maximum allowed runtime for this milestone |
+| `IncorrectFailure`            | The solution ran to completion but produced the wrong output (failed the challenge validator) |
+| `PolicyViolation`             | The submission violated a security or runtime policy (e.g. disallowed Dockerfile instructions) |
+| `InvalidSubmissionFailure`    | General "the submission was invalid" (catch-all for early validation problems) |
+| `InternalFailure`             | An unexpected internal error occurred inside the validator |
+| `Unknown`                     | A failure occurred but the validator did not record a more specific reason |
 
 ### Miner-Internal Status
-- `OFFERED` — Your miner has served this submission to a particular validator (used for deduplication). This is set locally and is not a validator result.
+- `Submitted` — Your miner has served (offered) this submission to a particular validator. This is recorded locally for CLI visibility, but does *not* permanently block re-offers. We keep re-offering to the validator until it claims the work and reports a real status back ("Pending", a result, or a failure reason). This makes the system more recoverable if the validator was busy or a platform claim didn't stick.
 
 ## Trusted Validator Allowlist
 

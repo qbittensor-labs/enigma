@@ -21,7 +21,7 @@ import os
 import pytest
 
 from qbittensor.dto.challenge import ChallengeSubmissionVerifyUploadAddressResponse
-from qbittensor.utils.solution_status import SolutionStatus
+from qbittensor.utils.solution_status import SolutionStatus, ValidationFailureReason
 from qbittensor.challenges.solution_output import SOLUTION_LOG_FILENAME
 from qbittensor.validator.solution.validate_solution_output import (
     establish_upload_locations_for_solution_data,
@@ -110,7 +110,7 @@ class TestValidateSolutionCorePaths:
             challenge_milestone_id="m-x",
             challenge_id="c-x",
         )
-        assert status.upper() == "FAILED_UPLOAD"
+        assert status == ValidationFailureReason.UPLOAD_FAILURE.value
 
     def test_perform_validation_success_reports_success_with_keys(self, tmp_path, platform_client):
         ws = str(tmp_path / "ws")

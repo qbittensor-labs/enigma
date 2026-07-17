@@ -49,7 +49,7 @@ from qbittensor.validator.solution.run_solution import (
     run_image_detached,
 )
 from qbittensor.validator.solution.exceptions.invalid_solution import InvalidSolutionError
-from qbittensor.validator.solution.run import clean_up_failed_solution, run_solution_management
+from qbittensor.validator.solution.run import clean_up_failed_solution, execute_verified_solution, run_solution_management
 from qbittensor.utils.solution_status import ValidationFailureReason
 
 
@@ -899,3 +899,56 @@ class TestRunSolutionManagement:
         )
         call_kwargs = platform_client.report_submission_status.call_args.kwargs
         assert call_kwargs["failure_reason"] == ValidationFailureReason.POLICY_VIOLATION.value
+
+
+def test_run_solution_management_create_fails_returns_none_without_report():
+    """Early return when create_challenge_solution fails (covers falsy solution_id path)."""
+    db = Mock()
+    db.db_query.has_seen_tx_hash = Mock(return_value=False)
+    db.db_query.create_challenge_solution = Mock(return_value=None)  # triggers early exit
+    db.db_query.update_challenge_solution_status_by_id = Mock()
+
+    platform_client = Mock()
+
+    result = run_solution_management(
+        db_conn=db,
+        validator_label="lbl",
+        download_url="url",
+        challenge_milestone_id="m",
+        challenge_validation_solution_id="sol",
+        tx_hash="tx",
+        miner_hotkey="hk",
+        submission_id="sub",
+        challenge_id="challenge-id",
+        platform_client=platform_client,
+    )
+    assert result == (None, None, None)
+    # Should not have tried to report via platform on this path (create failed before insert)
+    platform_client.report_submission_status.assert_not_called()
+
+
+@patch("qbittensor.validator.solution.run.assert_milestone_supported")
+@patch("qbittensor.validator.solution.run.run_solution_management", return_value=("img", "ctr", "f"))
+def test_execute_verified_solution_reports_unknown_on_missing_runtime(_run_mgmt, _assert):
+    """Covers the max_solution_runtime missing path in execute_verified_solution -> reports Failure + UNKNOWN."""
+    db = Mock()
+    platform = Mock()
+    platform.get_milestone_configuration.return_value = {"max_solution_runtime": None}  # or missing -> None
+
+    res = execute_verified_solution(
+        db_conn=db,
+        platform_client=platform,
+        validator_label="v",
+        download_url="u",
+        challenge_milestone_id="mil",
+        challenge_validation_solution_id="cvsid",
+        submission_id="subid",
+        tx_hash="txh",
+        miner_hotkey="hk",
+        challenge_id="ch-id",
+    )
+    assert res == (None, None, None)
+    platform.report_submission_status.assert_called()
+    kwargs = platform.report_submission_status.call_args.kwargs
+    assert kwargs["status"] == "Failure"
+    assert kwargs["failure_reason"] == ValidationFailureReason.UNKNOWN.value

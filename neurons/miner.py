@@ -164,7 +164,7 @@ class Miner(BaseMinerNeuron):
 
         self.db_query.record_solution_served_to_validator(miner_submission.tx_hash)
 
-        self.db_query.record_submission_offered_to_validator(
+        self.db_query.record_submission_submitted_to_validator(
             tx_hash=miner_submission.tx_hash,
             validator_hotkey=validator_hotkey,
             challenge_milestone_id=miner_submission.challenge_milestone_id,

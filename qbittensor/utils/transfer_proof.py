@@ -29,9 +29,12 @@ from qbittensor.dto.challenge import TransferProof
 TRANSFER_DEST_SS58 = "5D82xX2p14X7gCGKu2Hpf8feNAzeXefgoeh4UJgVRpVTbVP4"
 
 try:
-    from substrateinterface.exceptions import ExtrinsicNotFound
+    from async_substrate_interface.errors import ExtrinsicNotFound
 except ImportError:  # pragma: no cover
-    ExtrinsicNotFound = type("ExtrinsicNotFound", (Exception,), {})
+    try:
+        from substrateinterface.exceptions import ExtrinsicNotFound
+    except ImportError:
+        ExtrinsicNotFound = type("ExtrinsicNotFound", (Exception,), {})
 
 import bittensor as bt
 

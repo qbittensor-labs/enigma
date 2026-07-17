@@ -55,7 +55,7 @@ def validate_solution(
             SolutionPostProcessInfo.execution) are always present for completed solutions.
 
     Returns:
-        Solution status string (e.g. ``SolutionStatus.SUCCESS``).
+        Solution status string (e.g. ``SolutionStatus.SUCCESS`` which is now "Success").
     """
     container_output_path = os.path.join(solution_workspace_path, CONTAINER_OUTPUT_DIRNAME)
     bt.logging.info(
@@ -69,7 +69,7 @@ def validate_solution(
 
     if not logs_data or not solution_output_data:
         bt.logging.info("❌ Could not establish upload locations for solution output and logs")
-        return SolutionStatus.FAILED_UPLOAD.value
+        return ValidationFailureReason.UPLOAD_FAILURE.value
 
     bt.logging.info("📤 Uploading validator logs package (docker build + container stdout) to platform")
     logs_uploaded = upload_logs_package(container_output_path, logs_data)
@@ -156,7 +156,7 @@ def perform_solution_output_validation(
             bt.logging.info("\t✅ Successfully updated platform with successful validation status")
             return SolutionStatus.SUCCESS.value
         else:
-            return SolutionStatus.FAILED_UPLOAD.value
+            return ValidationFailureReason.UPLOAD_FAILURE.value
 
     else:
         bt.logging.info("\t❌ Solution output invalid")
@@ -189,7 +189,7 @@ def perform_solution_output_validation(
             bt.logging.info("\t✅ Successfully updated platform with failed validation status")
             return ValidationFailureReason.INCORRECT_FAILURE.value
         else:
-            return SolutionStatus.FAILED_UPLOAD.value
+            return ValidationFailureReason.UPLOAD_FAILURE.value
 
 
 def upload_zip_to_platform(

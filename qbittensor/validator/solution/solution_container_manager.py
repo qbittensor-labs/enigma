@@ -728,7 +728,7 @@ class SolutionContainerManager:
     def _finalize_solution_terminal(
         self,
         sol,
-        status: str = SolutionStatus.FAILED.value,
+        status: str = SolutionStatus.FAILURE.value,
         reason: str = "Solution terminated (container lost, overdue, or cleaned up)",
         attempt_extraction: bool = False,
         failure_reason: str | None = None,
@@ -939,7 +939,7 @@ class SolutionContainerManager:
                         # Delegate to central helper
                         self._finalize_solution_terminal(
                             sol,
-                            status=SolutionStatus.FAILED.value,
+                            status=SolutionStatus.FAILURE.value,
                             reason="Container no longer exists (cleaned up by validator or externally); reconciled by watchdog to prevent stuck RUNNING state.",
                             attempt_extraction=True,
                         )
@@ -993,7 +993,7 @@ class SolutionContainerManager:
                                 # This will also trigger workspace folder removal via _finalize
                                 self._finalize_solution_terminal(
                                     sol,
-                                    status=SolutionStatus.FAILED.value,
+                                    status=SolutionStatus.FAILURE.value,
                                     reason="Prune safety: container was exited but DB row was still in-flight",
                                     attempt_extraction=False,
                                 )
@@ -1115,7 +1115,7 @@ class SolutionContainerManager:
                 if sol:
                     self._finalize_solution_terminal(
                         sol,
-                        status=SolutionStatus.FAILED.value,
+                        status=SolutionStatus.FAILURE.value,
                         reason="Orphaned container cleaned up (no associated workspace found)",
                         attempt_extraction=False,
                     )
@@ -1248,7 +1248,7 @@ class SolutionContainerManager:
                     if sol.solution_status in (SolutionStatus.RUNNING.value, SolutionStatus.PENDING.value):
                         self._finalize_solution_terminal(
                             sol,
-                            status=SolutionStatus.FAILED.value,
+                            status=SolutionStatus.FAILURE.value,
                             reason="Validator recovered lost in-flight solution on startup (container no longer present)",
                             attempt_extraction=True,
                         )

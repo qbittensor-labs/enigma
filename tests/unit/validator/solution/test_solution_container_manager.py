@@ -489,7 +489,7 @@ class TestStartupRecovery:
         assert any("rm " in c or "rmi" in c for c in calls)
         mock_rmtree.assert_called()
         container_manager.database_connection.db_query.mark_solution_cleaned.assert_called_once_with("lost-9")
-        container_manager.database_connection.db_query.update_solution_status_by_id.assert_called_once_with("lost-9", SolutionStatus.FAILED.value)
+        container_manager.database_connection.db_query.update_solution_status_by_id.assert_called_once_with("lost-9", SolutionStatus.FAILURE.value)
 
     def test_exited_but_uncleaned_gets_handled_via_handle_completed(self, container_manager):
         # After handle_completed processes an exited, the re-query returns empty for uncleaned -> nothing further
@@ -524,7 +524,7 @@ class TestStartupRecovery:
         assert mock_run.call_count == 0
         mock_rmtree.assert_not_called()
         container_manager.database_connection.db_query.mark_solution_cleaned.assert_called_once_with("orphan-p")
-        container_manager.database_connection.db_query.update_solution_status_by_id.assert_called_once_with("orphan-p", SolutionStatus.FAILED.value)
+        container_manager.database_connection.db_query.update_solution_status_by_id.assert_called_once_with("orphan-p", SolutionStatus.FAILURE.value)
 
 
 # =============================================================================
@@ -600,13 +600,13 @@ class TestFinalizeSolutionTerminal:
 
         container_manager._finalize_solution_terminal(
             sol,
-            status=SolutionStatus.FAILED.value,
+            status=SolutionStatus.FAILURE.value,
             reason="test reason overdue",
             attempt_extraction=True,
         )
 
         container_manager.database_connection.db_query.update_solution_status_by_id.assert_called_once_with(
-            "sol-finalize", SolutionStatus.FAILED.value
+            "sol-finalize", SolutionStatus.FAILURE.value
         )
         container_manager.database_connection.db_query.mark_solution_cleaned.assert_called_once_with("sol-finalize")
         container_manager.platform_client.report_submission_status.assert_called_once()
