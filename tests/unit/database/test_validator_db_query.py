@@ -80,11 +80,11 @@ class TestDBQuery:
 
         # Also test by id again for failed
         ok2 = validator_query.update_solution_status_by_id(
-            original_id, SolutionStatus.FAILED.value
+            original_id, SolutionStatus.FAILURE.value
         )
         assert ok2 is True
         row = validator_query.get_challenge_solution_by_id(original_id)
-        assert row.solution_status == SolutionStatus.FAILED.value
+        assert row.solution_status == SolutionStatus.FAILURE.value
 
     def test_insert_early_and_update_challenge_solution(self, validator_query):
         created_id = validator_query.create_challenge_solution(
@@ -268,7 +268,7 @@ class TestDBQuery:
         assert "5Miner" in miners
 
     def test_get_miner_submission_statuses(self, validator_query):
-        data = _insert_solution(validator_query)
+        data = _insert_solution(validator_query, solution_status=SolutionStatus.SUCCESS.value)
         statuses = validator_query.get_miner_submission_statuses(data["miner_hotkey"])
         assert len(statuses) == 1
         assert statuses[0].tx_hash == data["tx_hash"]

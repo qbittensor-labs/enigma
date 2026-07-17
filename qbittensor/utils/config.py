@@ -305,6 +305,10 @@ def add_validator_args(cls, parser):
 def config(cls):
     """
     Returns the configuration object specific to this miner or validator after adding relevant arguments.
+
+    Bittensor 10.5+ defaults BT_NO_PARSE_CLI_ARGS to true, which skips argparse
+    entirely and leaves neuron/wallet CLI defaults unset. Neuron entrypoints still
+    need parser defaults and real CLI args, so we temporarily enable parsing here.
     """
     parser = argparse.ArgumentParser()
     bt.Wallet.add_args(parser)
@@ -312,4 +316,14 @@ def config(cls):
     bt.logging.add_args(parser)
     bt.Axon.add_args(parser)
     cls.add_args(parser)
-    return bt.Config(parser)
+
+    # Force CLI parsing for this Config construction only.
+    prev = os.environ.get("BT_NO_PARSE_CLI_ARGS")
+    os.environ["BT_NO_PARSE_CLI_ARGS"] = "0"
+    try:
+        return bt.Config(parser)
+    finally:
+        if prev is None:
+            os.environ.pop("BT_NO_PARSE_CLI_ARGS", None)
+        else:
+            os.environ["BT_NO_PARSE_CLI_ARGS"] = prev

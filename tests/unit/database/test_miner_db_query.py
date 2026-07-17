@@ -28,10 +28,10 @@ def miner_query(miner_db):
 
 
 class TestDBQueryMiner:
-    def _insert(self, query, tx_hash, miner_db, *, submitted_at=None, updated_at=None):
+    def _insert(self, query, tx_hash, miner_db, *, submitted_at=None, updated_at=None, challenge_milestone_id="milestone-1"):
         ok = query.insert_miner_submission(
             upload_id="up-1",
-            challenge_milestone_id="milestone-1",
+            challenge_milestone_id=challenge_milestone_id,
             miner_hotkey="5MinerHotkey",
             tx_hash=tx_hash,
             challenge_id="ch-1",
@@ -93,19 +93,82 @@ class TestDBQueryMiner:
             "m1", "RUNNING", "5Validator", "0xstatus"
         ) is True
         assert miner_query.insert_miner_submission_status(
-            "m1", "SUCCESS", "5Validator", "0xstatus"
+            "m1", "Success", "5Validator", "0xstatus"
         ) is True
 
     def test_insert_miner_submission_status_unknown_tx_returns_false_no_error(self, miner_query):
         """Unknown tx_hash (e.g. stale status from validator history or cross-check) must be ignored gracefully.
 
         This prevents FOREIGN KEY constraint errors when validators send status updates
-        (including FAILED) for submissions the miner no longer has in its local DB.
+        (including Failure) for submissions the miner no longer has in its local DB.
         """
         # Must return False without raising IntegrityError on the FK to miner_submissions.tx_hash
         assert miner_query.insert_miner_submission_status(
             challenge_milestone_id="milestone-x",
-            solution_status="FAILED",
+            solution_status="Failure",
             validator_hotkey="5Validator",
             tx_hash="0xnonexistent-tx-that-was-never-inserted",
         ) is False
+
+    def test_record_submitted_only_on_first_offer(self, miner_query, miner_db):
+        """record_submission_submitted_to_validator inserts 'Submitted' only on first call (DO NOTHING)."""
+        self._insert(miner_query, "0xfirst-offer", miner_db, challenge_milestone_id="ms-1")
+        vhot = "5Val1"
+
+        assert miner_query.record_submission_submitted_to_validator("0xfirst-offer", vhot, "ms-1") is True
+        # Second call for identical (validator,tx,milestone) does nothing but succeeds
+        assert miner_query.record_submission_submitted_to_validator("0xfirst-offer", vhot, "ms-1") is True
+
+        listed = miner_query.list_my_submissions_with_status(limit=10)
+        sub = next((s for s in listed if s["tx_hash"] == "0xfirst-offer"), None)
+        assert sub is not None
+        assert sub["validator_statuses"]["5Val1"]["status"] == "Submitted"
+
+    def test_get_next_for_validator_reoffers_on_submitted(self, miner_query, miner_db):
+        """'Submitted' marker does not count as seen; re-offer until real status arrives."""
+        self._insert(miner_query, "0xreoffer", miner_db, challenge_milestone_id="ms-re")
+        vhot = "5ValReoffer"
+
+        miner_query.record_submission_submitted_to_validator("0xreoffer", vhot, "ms-re")
+        nxt = miner_query.get_next_miner_submission_for_validator(vhot)
+        assert nxt is not None and nxt.tx_hash == "0xreoffer"
+
+    def test_get_next_for_validator_stops_after_real_status(self, miner_query, miner_db):
+        """Once validator reports real status (Pending/Success/Failure/granular), stop re-offering to it."""
+        self._insert(miner_query, "0xclaimed", miner_db, challenge_milestone_id="ms-claim")
+        vhot = "5ValClaim"
+        miner_query.record_submission_submitted_to_validator("0xclaimed", vhot, "ms-claim")
+        miner_query.insert_miner_submission_status("ms-claim", "Pending", vhot, "0xclaimed")
+        assert miner_query.get_next_miner_submission_for_validator(vhot) is None
+
+        # Granular failure reason value as status also blocks
+        self._insert(miner_query, "0xfailed", miner_db, challenge_milestone_id="ms-fail")
+        miner_query.record_submission_submitted_to_validator("0xfailed", vhot, "ms-fail")
+        miner_query.insert_miner_submission_status("ms-fail", "BuildFailure", vhot, "0xfailed")
+        assert miner_query.get_next_miner_submission_for_validator(vhot) is None
+
+    def test_get_next_for_validator_independent_per_validator(self, miner_query, miner_db):
+        """Each validator has its own seen state; one validator's status does not affect another."""
+        self._insert(miner_query, "0xmulti", miner_db, challenge_milestone_id="ms-multi")
+        v1, v2 = "5ValOne", "5ValTwo"
+        miner_query.record_submission_submitted_to_validator("0xmulti", v1, "ms-multi")
+        miner_query.insert_miner_submission_status("ms-multi", "Success", v1, "0xmulti")
+
+        # v1 has real status -> no more for v1
+        assert miner_query.get_next_miner_submission_for_validator(v1) is None
+        # v2 has only nothing/Submitted path -> still offered
+        assert miner_query.get_next_miner_submission_for_validator(v2) is not None
+
+    def test_list_my_submissions_with_status_aggregates_per_validator(self, miner_query, miner_db):
+        """list_my... returns per-validator latest status (including granular reasons)."""
+        self._insert(miner_query, "0xlist", miner_db, challenge_milestone_id="ms-list")
+        miner_query.record_submission_submitted_to_validator("0xlist", "5V-A", "ms-list")
+        miner_query.insert_miner_submission_status("ms-list", "Running", "5V-A", "0xlist")
+        miner_query.insert_miner_submission_status("ms-list", "WallTimeFailure", "5V-B", "0xlist")
+
+        listed = miner_query.list_my_submissions_with_status(limit=5)
+        sub = next((s for s in listed if s["tx_hash"] == "0xlist"), None)
+        assert sub is not None
+        vs = sub["validator_statuses"]
+        assert vs["5V-A"]["status"] == "Running"
+        assert vs["5V-B"]["status"] == "WallTimeFailure"

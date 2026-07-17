@@ -1541,9 +1541,23 @@ def _submission_table(submissions: list[dict], selected: int) -> Table:
         )
 
         status_lines = []
-        for vhotkey, info in (sub.get("validator_statuses") or {}).items():
+        validator_statuses = sub.get("validator_statuses") or {}
+        has_failure = any(
+            str(info.get("status", "")).lower() not in ("success", "submitted", "offered", "pending", "running")
+            for info in validator_statuses.values()
+        )
+        for vhotkey, info in validator_statuses.items():
             status = info.get("status", "?")
-            color = c(2) if str(status).lower() in ("success", "offered") else c(1)
+            st_lower = str(status).lower()
+            if has_failure and st_lower in ("submitted", "offered", "pending", "running"):
+                status_lines.append("[dim]—[/dim]")
+                continue
+            if st_lower in ("success", "submitted", "offered"):
+                color = c(2)
+            elif st_lower in ("pending", "running"):
+                color = c(3)  # neutral / in-progress
+            else:
+                color = c(1)
             status_lines.append(f"[{color}]{status}[/]")
 
         status_display = "  ".join(status_lines) if status_lines else "[dim]—[/dim]"
@@ -1593,13 +1607,27 @@ def _show_submission_details(console: Console, sub: dict[str, Any]) -> None:
     statuses = sub.get("validator_statuses") or {}
     if statuses:
         body.append("Validator Reports:\n", style="bold")
+        # If any validator reported a failure, hide 'Submitted' for the others
+        has_failure = any(
+            str(info.get("status", "")).lower() not in ("success", "submitted", "offered", "pending", "running")
+            for info in statuses.values()
+        )
         for vhotkey, info in statuses.items():
             status = info.get("status", "?")
-            color = c(2) if str(status).lower() in ("success", "offered") else c(1)
+            st_lower = str(status).lower()
             ts = info.get("reported_at")
             ts_str = ts.strftime("%Y-%m-%d %H:%M") if ts else ""
             body.append(f"  {vhotkey[:10]}...  ", style="dim")
-            body.append(f"[{color}]{status}[/]", style=color)
+            if has_failure and st_lower in ("submitted", "offered", "pending", "running"):
+                body.append("[dim]—[/]", style="dim")
+            else:
+                if st_lower in ("success", "submitted", "offered"):
+                    color = c(2)
+                elif st_lower in ("pending", "running"):
+                    color = c(3)  # neutral / in-progress
+                else:
+                    color = c(1)
+                body.append(f"[{color}]{status}[/]", style=color)
             if ts_str:
                 body.append(f"  ({ts_str})", style="dim")
             body.append("\n")

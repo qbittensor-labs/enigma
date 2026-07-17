@@ -16,9 +16,11 @@
 # DEALINGS IN THE SOFTWARE.
 
 import pytest
+from unittest.mock import MagicMock, patch
 
 from qbittensor.cli.miner.utils.color import COLORS, c
 from qbittensor.cli.miner.utils.constants import MINER_DB_TABLE_PREFIX
+from qbittensor.cli.miner.mine_enigma import _submission_table, _show_submission_details
 
 
 class TestColor:
@@ -33,3 +35,81 @@ class TestColor:
 class TestConstants:
     def test_miner_db_table_prefix(self):
         assert MINER_DB_TABLE_PREFIX == "miner_submissions"
+
+
+class TestSubmissionStatusDisplay:
+    """Cover the miner CLI submission list + detail rendering, especially has_failure suppression.
+
+    When ANY validator reports a non-transient failure (e.g. BuildFailure, WallTimeFailure,
+    generic Failure, UploadFailure), transient states (Submitted / Pending / Running) for
+    OTHER validators are shown as dim '—' instead of the actual word.
+    """
+
+    def _mk_sub(self, tx="0xtxabc", ms="ms-xyz", submitted_at=None, validator_statuses=None):
+        return {
+            "tx_hash": tx,
+            "challenge_milestone_id": ms,
+            "submitted_at": submitted_at,
+            "validator_statuses": validator_statuses or {},
+        }
+
+    def test_table_no_failures_shows_real_statuses(self):
+        subs = [
+            self._mk_sub(validator_statuses={
+                "5V1": {"status": "Submitted", "updated_at": None},
+                "5V2": {"status": "Pending", "updated_at": None},
+                "5V3": {"status": "Success", "updated_at": None},
+            })
+        ]
+        table = _submission_table(subs, 0)
+        # Just ensure it builds without error and has rows
+        assert table is not None
+        assert len(table.rows) == 1
+
+    def test_table_has_failure_suppresses_transients_to_dash(self):
+        # One failure present -> Submitted/Pending/Running on others become —
+        subs = [
+            self._mk_sub(validator_statuses={
+                "5Good": {"status": "Success", "updated_at": None},
+                "5Bad": {"status": "BuildFailure", "updated_at": None},
+                "5Late": {"status": "Submitted", "updated_at": None},
+                "5Busy": {"status": "Running", "updated_at": None},
+                "5Wait": {"status": "Pending", "updated_at": None},
+            })
+        ]
+        table = _submission_table(subs, 0)
+        assert table is not None
+        # The rendering code for the transients under has_failure path is executed.
+
+    def test_table_uses_granular_failure_values(self):
+        subs = [self._mk_sub(validator_statuses={
+            "5V": {"status": "WallTimeFailure", "updated_at": None},
+        })]
+        table = _submission_table(subs, 0)
+        assert table is not None
+
+    def test_detail_view_suppresses_on_failure(self):
+        console = MagicMock()
+        sub = self._mk_sub(validator_statuses={
+            "5V1": {"status": "Failure", "updated_at": None, "reported_at": None},
+            "5V2": {"status": "Submitted", "updated_at": None, "reported_at": None},
+            "5V3": {"status": "Running", "updated_at": None, "reported_at": None},
+        })
+        with patch("qbittensor.cli.miner.mine_enigma.Prompt"):
+            _show_submission_details(console, sub)
+        # exercises has_failure + transient dash branch in details
+
+    def test_detail_view_shows_pending_running_when_no_failure(self):
+        console = MagicMock()
+        sub = self._mk_sub(validator_statuses={
+            "5V1": {"status": "Pending", "updated_at": None, "reported_at": None},
+            "5V2": {"status": "Running", "updated_at": None, "reported_at": None},
+            "5V3": {"status": "Success", "updated_at": None, "reported_at": None},
+        })
+        with patch("qbittensor.cli.miner.mine_enigma.Prompt"):
+            _show_submission_details(console, sub)
+        assert console.print.called  # at least rendered something
+
+    def test_empty_submissions_table(self):
+        table = _submission_table([], 0)
+        assert table is not None

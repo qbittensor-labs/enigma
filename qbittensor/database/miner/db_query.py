@@ -25,8 +25,7 @@ from ..base_query import BaseDBQuery
 from .db_models import MinerSubmission, MinerSubmissionStatus
 
 # Canonical status values stored in miner_submission_statuses.solution_status
-# (kept in ALL CAPS for consistency with SolutionStatus on the validator side)
-MINER_SUBMISSION_STATUS_OFFERED = "OFFERED"
+MINER_SUBMISSION_STATUS_SUBMITTED = "Submitted"
 
 
 class DBQueryMiner(BaseDBQuery):
@@ -131,7 +130,7 @@ class DBQueryMiner(BaseDBQuery):
 
         Uses SQLite ON CONFLICT DO UPDATE so that if a row already exists for the
         (validator_hotkey, tx_hash, challenge_milestone_id) tuple (e.g. we previously
-        recorded "OFFERED"), we atomically update the status instead of attempting
+        recorded "Submitted"), we atomically update the status instead of attempting
         a duplicate INSERT (which can fail the tx_hash FK or create duplicates).
 
         If no MinerSubmission row exists for the tx_hash (e.g. stale status update
@@ -180,32 +179,63 @@ class DBQueryMiner(BaseDBQuery):
             bt.logging.error(f"❌ Error upserting miner submission status: {e}")
             return False
 
-    def record_submission_offered_to_validator(
+    def record_submission_submitted_to_validator(
         self, tx_hash: str, validator_hotkey: str, challenge_milestone_id: str
     ) -> bool:
         """
-        Record that we have offered (served) this submission to a specific validator.
-        This creates an 'OFFERED' status entry so we can avoid re-offering the same
-        submission to the same validator in the future.
+        Record that we have submitted (served) this submission to a specific validator.
+        This creates a 'Submitted' status entry (visible in CLI) but does *not* permanently
+        block re-offers — we only stop re-offering once the validator reports a real status
+        (e.g. "Pending" or a result).
+
+        We insert the "Submitted" marker *only on the first offer* to this validator for
+        this tx (using ON CONFLICT DO NOTHING). Subsequent re-offers do not touch the row
+        (so updated_at reflects the first contact time). Real statuses from the validator
+        will overwrite it via the normal upsert path.
         """
-        return self.insert_miner_submission_status(
-            challenge_milestone_id=challenge_milestone_id,
-            solution_status=MINER_SUBMISSION_STATUS_OFFERED,
-            validator_hotkey=validator_hotkey,
-            tx_hash=tx_hash,
-        )
+        try:
+            with self._managed_session() as session:
+                now = datetime.now(timezone.utc)
+                stmt = sqlite_insert(MinerSubmissionStatus).values(
+                    id=str(uuid.uuid4()),
+                    challenge_milestone_id=challenge_milestone_id,
+                    solution_status=MINER_SUBMISSION_STATUS_SUBMITTED,
+                    validator_hotkey=validator_hotkey,
+                    tx_hash=tx_hash,
+                    created_at=now,
+                    updated_at=now,
+                )
+                stmt = stmt.on_conflict_do_nothing(
+                    index_elements=["validator_hotkey", "tx_hash", "challenge_milestone_id"]
+                )
+                session.execute(stmt)
+                return True
+        except Exception as e:
+            bt.logging.error(f"❌ Error recording first Submitted for {tx_hash}: {e}")
+            return False
 
     def get_next_miner_submission_for_validator(self, validator_hotkey: str) -> MinerSubmission | None:
         """
-        Return the next submission that has never been offered to this specific validator yet.
-        This enables proper per-validator deduplication of offerings.
+        Return the next submission that this validator has not yet claimed (i.e. has not
+        reported back a real status like "Pending" or a result).
+
+        We keep re-offering (subject to other rules) as long as the validator only has
+        our local "Submitted" marker or nothing. This improves recoverability if the
+        validator was busy or a platform claim didn't stick.
         """
         try:
             with self._managed_session(read_only=True) as session:
-                # Subquery of tx_hashes this validator has already seen (any status)
+                # Subquery of tx_hashes where this validator has reported a *real* status
+                # (anything other than the local "Submitted" marker we inserted when offering).
+                # This means we keep re-offering until the validator actually claims it
+                # (and reports back "Pending", a result, or a failure).
+                # "Submitted" alone (or no row) does not count as "seen" for dedup.
                 seen_subq = (
                     session.query(MinerSubmissionStatus.tx_hash)
-                    .filter(MinerSubmissionStatus.validator_hotkey == validator_hotkey)
+                    .filter(
+                        MinerSubmissionStatus.validator_hotkey == validator_hotkey,
+                        MinerSubmissionStatus.solution_status != MINER_SUBMISSION_STATUS_SUBMITTED,
+                    )
                     .subquery()
                 )
 

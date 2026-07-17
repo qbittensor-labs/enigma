@@ -20,11 +20,10 @@ from enum import Enum
 
 
 class SolutionStatus(Enum):
-    PENDING = "PENDING"
-    RUNNING = "RUNNING"
-    SUCCESS = "SUCCESS"
-    FAILED = "FAILED"
-    FAILED_UPLOAD = "FAILED_UPLOAD"
+    PENDING = "Pending"
+    RUNNING = "Running"
+    SUCCESS = "Success"
+    FAILURE = "Failure"
 
 
 class ValidationFailureReason(str, Enum):
@@ -43,6 +42,7 @@ class ValidationFailureReason(str, Enum):
     IMAGE_VALIDATION_FAILURE = "ImageValidationFailure"
     INVALID_PROGRAM = "InvalidProgram"
     POLICY_VIOLATION = "PolicyViolation"
+    UPLOAD_FAILURE = "UploadFailure"
 
     @property
     def default_message(self) -> str:
@@ -61,5 +61,6 @@ class ValidationFailureReason(str, Enum):
             ValidationFailureReason.IMAGE_VALIDATION_FAILURE: "The built Docker image failed validation checks and cannot be run.",
             ValidationFailureReason.INVALID_PROGRAM: "The program provided in the zip is invalid. It may be missing required files, have syntax errors, or fail other validation checks.",
             ValidationFailureReason.POLICY_VIOLATION: "Dockerfile failed security policy checks.",
+            ValidationFailureReason.UPLOAD_FAILURE: "Failed to establish upload locations for validator logs or solution output.",
         }
         return _messages.get(self, "Validation failed.")
