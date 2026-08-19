@@ -50,7 +50,7 @@ from qbittensor.validator.solution.run_solution import (
 )
 from qbittensor.validator.solution.exceptions.invalid_solution import InvalidSolutionError
 from qbittensor.validator.solution.run import clean_up_failed_solution, execute_verified_solution, run_solution_management
-from qbittensor.utils.solution_status import ValidationFailureReason
+from qbittensor.utils.solution_status import OutputExtractionStatus, ValidationFailureReason
 
 
 def _build_stdout_with_payload(logs: bytes, payload: bytes, separator_count: int = 1, *, encode: bool = True) -> bytes:
@@ -96,7 +96,7 @@ class TestExtractStdoutOutput:
             # Simulate real logs() returning text (text=True in subprocess)
             mock_ops.logs.return_value = stdout if isinstance(stdout, str) else stdout.decode("utf-8", errors="replace")
             mock_docker_cls.return_value = mock_ops
-            assert extract_stdout_output("ctr", str(workspace)) is True
+            assert extract_stdout_output("ctr", str(workspace)) is OutputExtractionStatus.ARTIFACTS_EXTRACTED
 
         mock_ops.logs.assert_called_once_with("ctr", check=True)
 
@@ -126,7 +126,7 @@ class TestExtractStdoutOutput:
             # Simulate real logs() returning text (text=True in subprocess)
             mock_ops.logs.return_value = stdout if isinstance(stdout, str) else stdout.decode("utf-8", errors="replace")
             mock_docker_cls.return_value = mock_ops
-            assert extract_stdout_output("ctr", str(workspace)) is True
+            assert extract_stdout_output("ctr", str(workspace)) is OutputExtractionStatus.ARTIFACTS_EXTRACTED
         mock_ops.logs.assert_called_once_with("ctr", check=True)
 
         zip_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_OUTPUT_ZIP_FILENAME
@@ -142,8 +142,9 @@ class TestExtractStdoutOutput:
             mock_ops.logs.return_value = stdout_logs_have_sep if isinstance(stdout_logs_have_sep, str) else stdout_logs_have_sep.decode("utf-8", errors="replace")
             mock_docker_cls.return_value = mock_ops
             # First separator splits at offset 0 → logs are empty,
-            # payload starts with "logs\n<separator><b64>" which is not valid base64.
-            assert extract_stdout_output("ctr", str(ws2)) is False
+            # payload starts with "logs\n<separator><b64>". The tolerant cleaner
+            # may produce bytes, but those bytes are not a zip.
+            assert extract_stdout_output("ctr", str(ws2)) is OutputExtractionStatus.INVALID_ZIP
         mock_ops.logs.assert_called_once_with("ctr", check=True)
         log_path = ws2 / CONTAINER_OUTPUT_DIRNAME / SOLUTION_LOG_FILENAME
         # Full captured logs (combined) are written to the log file
@@ -157,7 +158,7 @@ class TestExtractStdoutOutput:
             # Simulate real logs() returning text (text=True in subprocess)
             mock_ops.logs.return_value = b"oops no marker\n" if isinstance(b"oops no marker\n", str) else b"oops no marker\n".decode("utf-8", errors="replace")
             mock_docker_cls.return_value = mock_ops
-            assert extract_stdout_output("ctr", str(workspace)) is True
+            assert extract_stdout_output("ctr", str(workspace)) is OutputExtractionStatus.NO_SEPARATOR
 
         mock_ops.logs.assert_called_once_with("ctr", check=True)
         log_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_LOG_FILENAME
@@ -180,7 +181,7 @@ class TestExtractStdoutOutput:
             # Simulate real logs() returning text (text=True in subprocess)
             mock_ops.logs.return_value = stdout if isinstance(stdout, str) else stdout.decode("utf-8", errors="replace")
             mock_docker_cls.return_value = mock_ops
-            assert extract_stdout_output("ctr", str(workspace)) is False
+            assert extract_stdout_output("ctr", str(workspace)) is OutputExtractionStatus.INVALID_ZIP
 
         mock_ops.logs.assert_called_once_with("ctr", check=True)
         log_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_LOG_FILENAME
@@ -205,7 +206,7 @@ class TestExtractStdoutOutput:
             # Simulate real logs() returning text (text=True in subprocess)
             mock_ops.logs.return_value = stdout if isinstance(stdout, str) else stdout.decode("utf-8", errors="replace")
             mock_docker_cls.return_value = mock_ops
-            assert extract_stdout_output("ctr", str(workspace)) is False
+            assert extract_stdout_output("ctr", str(workspace)) is OutputExtractionStatus.INVALID_BASE64
 
         mock_ops.logs.assert_called_once_with("ctr", check=True)
         log_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_LOG_FILENAME
@@ -224,7 +225,7 @@ class TestExtractStdoutOutput:
             # Simulate real logs() returning text (text=True in subprocess)
             mock_ops.logs.return_value = stdout if isinstance(stdout, str) else stdout.decode("utf-8", errors="replace")
             mock_docker_cls.return_value = mock_ops
-            assert extract_stdout_output("ctr", str(workspace)) is False
+            assert extract_stdout_output("ctr", str(workspace)) is OutputExtractionStatus.STDOUT_TOO_LARGE
 
         mock_ops.logs.assert_called_once_with("ctr", check=True)
         log_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_LOG_FILENAME
@@ -240,7 +241,7 @@ class TestExtractStdoutOutput:
             err = subprocess.CalledProcessError(1, "docker logs", stderr=b"no such container")
             mock_ops.logs.side_effect = err
             mock_docker_cls.return_value = mock_ops
-            assert extract_stdout_output("ctr", str(workspace)) is False
+            assert extract_stdout_output("ctr", str(workspace)) is OutputExtractionStatus.DOCKER_LOGS_FAILED
         assert not (workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_LOG_FILENAME).exists()
 
     def test_rejects_zip_with_path_traversal(self, tmp_path):
@@ -257,7 +258,7 @@ class TestExtractStdoutOutput:
             # Simulate real logs() returning text (text=True in subprocess)
             mock_ops.logs.return_value = stdout if isinstance(stdout, str) else stdout.decode("utf-8", errors="replace")
             mock_docker_cls.return_value = mock_ops
-            assert extract_stdout_output("ctr", str(workspace)) is False
+            assert extract_stdout_output("ctr", str(workspace)) is OutputExtractionStatus.EXTRACT_FAILED
 
         mock_ops.logs.assert_called_once_with("ctr", check=True)
         assert not (workspace.parent / "escape.txt").exists()
@@ -552,7 +553,7 @@ class TestMockSolutionDockerIntegration:
                 f"{subprocess.run(['docker', 'logs', container_id], capture_output=True, text=True).stderr}"
             )
 
-            assert extract_stdout_output(container_id, str(workspace)) is True
+            assert extract_stdout_output(container_id, str(workspace)) is OutputExtractionStatus.ARTIFACTS_EXTRACTED
 
             artifacts_dir = (
                 workspace / CONTAINER_OUTPUT_DIRNAME / CONTAINER_SOLUTION_DIRNAME
@@ -799,6 +800,55 @@ class TestRunSolutionManagement:
         assert call_kwargs["failure_reason"] == ValidationFailureReason.INVALID_ZIP.value
 
     @patch("qbittensor.validator.solution.run.clean_up_failed_solution")
+    @patch("qbittensor.validator.solution.run.validate_image")
+    @patch("qbittensor.validator.solution.run.build_image")
+    @patch("qbittensor.validator.solution.run.reject_dockerfile", return_value=True)
+    @patch("qbittensor.validator.solution.run.validate_code", return_value=True)
+    @patch("qbittensor.validator.solution.run.unzip")
+    @patch("qbittensor.validator.solution.run.validate_zip", return_value=True)
+    @patch("qbittensor.validator.solution.run.download_zip", return_value="/tmp/f/solution.zip")
+    @patch("qbittensor.validator.solution.run.setup", return_value=("tag", "/tmp/f"))
+    @patch("qbittensor.validator.solution.run.os.makedirs")
+    @patch("qbittensor.validator.solution.run.prepare_challenge_input_mount_dir", return_value="/tmp/f/challenge_input")
+    @patch(
+        "qbittensor.validator.solution.run.run_challenge_setup",
+        side_effect=RuntimeError("Failed to download HQP metadata: No metadata assigned to this validator for the milestone"),
+    )
+    def test_setup_runtime_error_reports_internal_failure(
+        self, _setup_fn, _mount, _makedirs, _setup, _download, _zip, _unzip, _code, _reject, _build, _validate_image, mock_cleanup
+    ):
+        """HQP/RSA setup raises RuntimeError — must PATCH Failure/InternalFailure, not escape."""
+        db = Mock()
+        db.db_query.has_seen_tx_hash = Mock(return_value=False)
+        db.db_query.create_challenge_solution = Mock(return_value="sol-hqp-404")
+        db.db_query.update_challenge_solution_status_by_id = Mock(return_value=True)
+        platform_client = Mock()
+
+        result = run_solution_management(
+            db_conn=db,
+            validator_label="lbl",
+            download_url="url",
+            challenge_milestone_id="m",
+            challenge_validation_solution_id="sol",
+            tx_hash="tx",
+            miner_hotkey="hk",
+            submission_id="sub-hqp",
+            challenge_id="challenge-id",
+            platform_client=platform_client,
+        )
+        assert result == (None, None, None)
+        db.db_query.update_challenge_solution_status_by_id.assert_called_with(
+            solution_id="sol-hqp-404",
+            solution_status=ValidationFailureReason.INTERNAL_FAILURE.value,
+        )
+        call_kwargs = platform_client.report_submission_status.call_args.kwargs
+        assert call_kwargs["status"] == "Failure"
+        assert call_kwargs["failure_reason"] == ValidationFailureReason.INTERNAL_FAILURE.value
+        assert call_kwargs["submission_id"] == "sub-hqp"
+        assert "HQP metadata" in call_kwargs["reason"]
+        mock_cleanup.assert_called_once()
+
+    @patch("qbittensor.validator.solution.run.clean_up_failed_solution")
     @patch("qbittensor.validator.solution.run.download_zip")
     @patch("qbittensor.validator.solution.run.setup", return_value=("tag", "/tmp/f"))
     def test_unexpected_exception_falls_back_to_internal_failure(self, _setup, _download, mock_cleanup):
@@ -901,8 +951,8 @@ class TestRunSolutionManagement:
         assert call_kwargs["failure_reason"] == ValidationFailureReason.POLICY_VIOLATION.value
 
 
-def test_run_solution_management_create_fails_returns_none_without_report():
-    """Early return when create_challenge_solution fails (covers falsy solution_id path)."""
+def test_run_solution_management_create_fails_reports_internal_failure():
+    """Create failure must still PATCH Failure so the platform row cannot stay Running."""
     db = Mock()
     db.db_query.has_seen_tx_hash = Mock(return_value=False)
     db.db_query.create_challenge_solution = Mock(return_value=None)  # triggers early exit
@@ -923,8 +973,11 @@ def test_run_solution_management_create_fails_returns_none_without_report():
         platform_client=platform_client,
     )
     assert result == (None, None, None)
-    # Should not have tried to report via platform on this path (create failed before insert)
-    platform_client.report_submission_status.assert_not_called()
+    platform_client.report_submission_status.assert_called()
+    kwargs = platform_client.report_submission_status.call_args.kwargs
+    assert kwargs["status"] == "Failure"
+    assert kwargs["failure_reason"] == ValidationFailureReason.INTERNAL_FAILURE.value
+    assert kwargs["submission_id"] == "sub"
 
 
 @patch("qbittensor.validator.solution.run.assert_milestone_supported")

@@ -78,17 +78,16 @@ def mock_miner(mock_config):
         mock_wallet.return_value.hotkey.sign.return_value = b"fake_signature_bytes"
 
         mock_subtensor.return_value = Mock()
-        mock_subtensor.return_value.is_hotkey_registered.return_value = True
+        from tests.bt_v11_helpers import wire_v11_subtensor
 
-        mock_metagraph.return_value = Mock()
-        mock_metagraph.return_value.configure_mock(
+        mock_mg = wire_v11_subtensor(
+            mock_subtensor.return_value,
             hotkeys=["5ValidatorHotkey", "5MinerHotkey123", "5OtherMiner"],
-            S=np.array([1000.0, 0.0, 500.0]),  # stake values
+            netuid=1,
+            stakes=[1000.0, 0.0, 500.0],
             last_update=[0, 0, 0],
-            uids=np.array([0, 1, 2]),
-            axons=[Mock(), Mock(), Mock()],
         )
-        mock_metagraph.return_value.n = 3
+        mock_metagraph.return_value = mock_mg
 
         mock_axon.return_value = Mock()
 

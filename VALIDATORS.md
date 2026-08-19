@@ -25,6 +25,10 @@ foundryup
 
 The treasury scripts default to the public lite endpoint `https://lite.chain.opentensor.ai`. For higher reliability or if you hit rate limits during busy periods, you can obtain a dedicated RPC URL from a provider like [Nodies](https://www.nodies.app) and pass it via the `--rpc` / `--rpc-url` flag.
 
+### Docker (BuildKit required)
+
+Solution builds use `docker build --progress=plain`, which needs BuildKit/buildx. The validator **exits at startup** if `docker buildx version` fails. Install a current Docker Engine with the buildx plugin (for example `docker-ce` + `docker-buildx-plugin`). The legacy builder is not supported.
+
 ### NVIDIA GPU
 To run the validator on a NVIDIA GPU, you need to have the NVIDIA Container Toolkit installed and the NVIDIA driver installed. See [GPU_README.md](qbittensor/validator/utils/gpu_verification/GPU_README.md) for more details.
 
@@ -70,7 +74,7 @@ python3 treasury/scripts/associate_evm.py \
 
 The script defaults to `https://lite.chain.opentensor.ai`. Pass `--rpc-url YOUR_RPC` if needed.
 
-*Note: The script requires your hotkey's seed phrase to sign a message proving ownership of the hotkey, and your EVM private key to submit the transaction to the EVM network.*
+The hotkey must already be registered on the subnet (`btcli subnets register`). The EVM key signs the association message; the hotkey seed or private key signs the `associate_evm_key` extrinsic. Do not pass a vault/governor address or a Bittensor coldkey.
 
 ## 5. Notify the Treasury Admin
 

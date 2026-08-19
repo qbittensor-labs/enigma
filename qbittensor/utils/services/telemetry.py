@@ -18,6 +18,7 @@
 import time
 import bittensor as bt
 import numpy as np
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
 import queue
@@ -256,6 +257,287 @@ def _get_nvidia_driver_info() -> tuple[str, str]:
     return (driver or "none"), (cuda or "none")
 
 
+_DOCKER_VERSION_RE = re.compile(r"Docker version\s+(\S+)", re.IGNORECASE)
+_DOCKER_TEMPLATE_NA = {"", "<no value>", "<nil>", "<none>", "n/a"}
+
+
+def _clean_docker_version(raw: Optional[str]) -> str:
+    token = (raw or "").strip()
+    if token.lower() in _DOCKER_TEMPLATE_NA:
+        return ""
+    return token
+
+
+def _get_docker_versions() -> tuple[str, str]:
+    """Return (client_version, server_version).
+
+    Raises if the Docker CLI is missing, times out, or produces no client version.
+    Server may be empty when the CLI works but the daemon is down — that is not
+    a hard failure; the caller still reports the client.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "version", "--format", "{{.Client.Version}}\t{{.Server.Version}}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except FileNotFoundError as e:
+        raise RuntimeError("docker CLI not found in PATH") from e
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError("docker version timed out") from e
+    except Exception as e:
+        raise RuntimeError(f"docker version failed: {e}") from e
+
+    line = (result.stdout or "").strip()
+    if "\t" in line:
+        client_raw, server_raw = line.split("\t", 1)
+    else:
+        client_raw, server_raw = line, ""
+    client = _clean_docker_version(client_raw)
+    server = _clean_docker_version(server_raw)
+    if client:
+        return client, server
+
+    # Older CLIs may not support `docker version --format`.
+    try:
+        fallback = subprocess.run(
+            ["docker", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception as e:
+        raise RuntimeError(f"docker --version failed: {e}") from e
+    match = _DOCKER_VERSION_RE.search(fallback.stdout or "")
+    if match:
+        return match.group(1).rstrip(","), ""
+
+    err = (result.stderr or fallback.stderr or "").strip()
+    raise RuntimeError(
+        f"could not read docker version (rc={result.returncode}): {err[:200] or 'empty output'}"
+    )
+
+
+# NVML milliwatts -> watts. NVML_TEMPERATURE_GPU is 0; hardcoded so this module
+# still imports when pynvml is missing.
+_MW_PER_WATT = 1000.0
+_NVML_TEMPERATURE_GPU = 0
+
+# Only reasons that indicate the GPU is being held back. Idle / app-clock /
+# display bits are normal and would spam "gpu_idle" between solution runs.
+_THROTTLE_REASON_BITS = (
+    ("sw_power_cap", 0x0000000000000004),
+    ("hw_slowdown", 0x0000000000000008),
+    ("sw_thermal_slowdown", 0x0000000000000020),
+    ("hw_thermal_slowdown", 0x0000000000000040),
+    ("hw_power_brake_slowdown", 0x0000000000000080),
+)
+
+
+@dataclass
+class GpuStaticInfo:
+    """Per-GPU capability snapshot (startup). Missing fields stay None."""
+
+    index: int
+    memory_total_bytes: Optional[int] = None
+    compute_capability: Optional[str] = None
+    power_limit_watts: Optional[float] = None
+    power_default_limit_watts: Optional[float] = None
+    power_max_limit_watts: Optional[float] = None
+
+
+@dataclass
+class GpuRuntimeInfo:
+    """Per-GPU live snapshot (periodic). Missing fields stay None."""
+
+    index: int
+    utilization: Optional[float] = None
+    memory_usage_percent: Optional[float] = None
+    power_draw_watts: Optional[float] = None
+    power_limit_watts: Optional[float] = None
+    temperature_c: Optional[float] = None
+    throttle_reasons: Optional[str] = None
+
+
+def _selected_gpu_indices(device: str, device_count: int) -> list[int]:
+    """Apply --neuron.device filtering: cpu -> [], cuda:N -> [N], else all."""
+    if device == "cpu" or device_count <= 0:
+        return []
+    if device.startswith("cuda:"):
+        try:
+            idx = int(device.split(":", 1)[1])
+        except ValueError:
+            return []
+        if 0 <= idx < device_count:
+            return [idx]
+        return []
+    return list(range(device_count))
+
+
+def _mw_to_watts(milliwatts: Any) -> Optional[float]:
+    try:
+        return float(milliwatts) / _MW_PER_WATT
+    except (TypeError, ValueError):
+        return None
+
+
+def _decode_throttle_reasons(mask: int) -> str:
+    """Return comma-separated active limiter names, or 'none'.
+
+    Ignores idle / application-clocks / display bits so an idle card does not
+    look throttled.
+    """
+    names = [name for name, bit in _THROTTLE_REASON_BITS if mask & bit]
+    return ",".join(names) if names else "none"
+
+
+def _get_gpu_static_info(device: str) -> list[GpuStaticInfo]:
+    """Per-GPU VRAM / compute cap / power limits via NVML.
+
+    Only safe to call before TelemetryService's long-lived nvmlInit(): this path
+    does its own init/shutdown, matching _get_gpu_info.
+
+    Raises on NVML init/query failure so the caller can record a collection error.
+    Per-field NVML gaps stay None (the GPU may not expose that sensor).
+    """
+    if not NVML_AVAILABLE or device == "cpu":
+        return []
+    try:
+        nvmlInit()
+    except Exception as e:
+        raise RuntimeError(f"pynvml init failed: {e}") from e
+    try:
+        device_count = nvmlDeviceGetCount()
+        results: list[GpuStaticInfo] = []
+        handle_errors: list[str] = []
+        for i in _selected_gpu_indices(device, device_count):
+            try:
+                handle = nvmlDeviceGetHandleByIndex(i)
+            except Exception as e:
+                handle_errors.append(f"gpu {i}: {e}")
+                continue
+            info = GpuStaticInfo(index=i)
+            try:
+                info.memory_total_bytes = int(nvmlDeviceGetMemoryInfo(handle).total)
+            except Exception:
+                pass
+            try:
+                major, minor = nvmlDeviceGetCudaComputeCapability(handle)
+                info.compute_capability = f"{int(major)}.{int(minor)}"
+            except Exception:
+                pass
+            try:
+                info.power_limit_watts = _mw_to_watts(nvmlDeviceGetPowerManagementLimit(handle))
+            except Exception:
+                pass
+            try:
+                info.power_default_limit_watts = _mw_to_watts(
+                    nvmlDeviceGetPowerManagementDefaultLimit(handle)
+                )
+            except Exception:
+                pass
+            try:
+                constraints = nvmlDeviceGetPowerManagementLimitConstraints(handle)
+                info.power_max_limit_watts = _mw_to_watts(constraints[1])
+            except Exception:
+                pass
+            results.append(info)
+        if not results and handle_errors:
+            raise RuntimeError(
+                "pynvml returned no GPU capability snapshot: " + "; ".join(handle_errors)
+            )
+        return results
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f"pynvml static GPU query failed: {e}") from e
+    finally:
+        try:
+            nvmlShutdown()
+        except Exception:
+            pass
+
+
+def _get_gpu_runtime_info(indices: list[int]) -> list[GpuRuntimeInfo]:
+    """Per-GPU util / memory / power / temp / throttle via an already-initialized NVML.
+
+    Raises on total failure. Per-field NVML gaps stay None.
+    """
+    if not NVML_AVAILABLE or not indices:
+        return []
+    try:
+        results: list[GpuRuntimeInfo] = []
+        handle_errors: list[str] = []
+        for i in indices:
+            try:
+                handle = nvmlDeviceGetHandleByIndex(i)
+            except Exception as e:
+                handle_errors.append(f"gpu {i}: {e}")
+                continue
+            info = GpuRuntimeInfo(index=i)
+            try:
+                info.utilization = float(nvmlDeviceGetUtilizationRates(handle).gpu)
+            except Exception:
+                pass
+            try:
+                mem = nvmlDeviceGetMemoryInfo(handle)
+                if mem.total:
+                    info.memory_usage_percent = (mem.used / mem.total) * 100.0
+            except Exception:
+                pass
+            try:
+                info.power_draw_watts = _mw_to_watts(nvmlDeviceGetPowerUsage(handle))
+            except Exception:
+                pass
+            try:
+                info.power_limit_watts = _mw_to_watts(nvmlDeviceGetPowerManagementLimit(handle))
+            except Exception:
+                pass
+            try:
+                info.temperature_c = float(
+                    nvmlDeviceGetTemperature(handle, _NVML_TEMPERATURE_GPU)
+                )
+            except Exception:
+                pass
+            try:
+                try:
+                    mask = nvmlDeviceGetCurrentClocksEventReasons(handle)
+                except Exception:
+                    mask = nvmlDeviceGetCurrentClocksThrottleReasons(handle)
+                info.throttle_reasons = _decode_throttle_reasons(int(mask))
+            except Exception:
+                pass
+            results.append(info)
+        if not results and handle_errors:
+            raise RuntimeError(
+                "pynvml returned no runtime metrics: " + "; ".join(handle_errors)
+            )
+        return results
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f"pynvml runtime query failed: {e}") from e
+
+
+def _discover_gpu_indices(device: str) -> list[int]:
+    """Indices matching --neuron.device, via NVML."""
+    if not NVML_AVAILABLE or device == "cpu":
+        return []
+    try:
+        nvmlInit()
+        try:
+            return _selected_gpu_indices(device, nvmlDeviceGetCount())
+        finally:
+            try:
+                nvmlShutdown()
+            except Exception:
+                pass
+    except Exception as e:
+        bt.logging.warning(f"Could not populate GPU indices for periodic metrics (pynvml): {e}")
+        return []
+
+
 class TelemetryService:
     def __init__(
         self,
@@ -268,7 +550,7 @@ class TelemetryService:
         service_name: Optional[str] = None,
         network: Optional[str] = None,
         *,
-        keypair: Optional[bt.Keypair] = None,
+        keypair: Optional[Any] = None,
         base_url: Optional[str] = None,
         tensorauth_url: Optional[str] = None,
         netuid: Optional[int] = None,
@@ -440,6 +722,61 @@ class TelemetryService:
             bt.logging.warning(f"Queue full; dropping datapoint {type}")
             return False
 
+    def _enqueue_gpu_metric(
+        self,
+        type: str,
+        timestamp: str,
+        value: float | str | None,
+        gpu_index: int,
+    ) -> None:
+        """Enqueue a per-GPU datapoint; skip fields the collector could not read."""
+        if value is None:
+            return
+        if isinstance(value, str) and value == "":
+            return
+        self._enqueue_datapoint(type, timestamp, value, attributes={"gpu_index": gpu_index})
+
+    def _report_collection_error(self, timestamp: str, collector: str, error: BaseException) -> None:
+        """Log and emit a datapoint so a failed collector is visible without crashing."""
+        msg = f"{type(error).__name__}: {error}"
+        bt.logging.warning(f"Telemetry collection failed ({collector}): {msg}")
+        try:
+            self._enqueue_datapoint(
+                "system_collection_error",
+                timestamp,
+                collector,
+                attributes={"error": msg[:500]},
+            )
+        except Exception as enqueue_err:
+            bt.logging.warning(
+                f"Could not enqueue collection error for {collector}: {enqueue_err}"
+            )
+
+    def _try_record(self, timestamp: str, collector: str, fn) -> None:
+        """Run one collector. Never raises; records system_collection_error on failure."""
+        try:
+            fn()
+        except Exception as e:
+            self._report_collection_error(timestamp, collector, e)
+
+    def _record_updatable_host_info(self, timestamp: str) -> None:
+        """Docker / NVIDIA driver / CUDA — can change under a long-lived process."""
+        def docker_version():
+            client, server = _get_docker_versions()
+            self._enqueue_datapoint("system_docker_version", timestamp, client)
+            if server:
+                self._enqueue_datapoint("system_docker_server_version", timestamp, server)
+
+        def nvidia_versions():
+            driver_ver, cuda_ver = _get_nvidia_driver_info()
+            self._enqueue_datapoint("system_gpu_driver_version", timestamp, driver_ver)
+            self._enqueue_datapoint("system_cuda_version", timestamp, cuda_ver)
+            if self.device != "cpu" and driver_ver == "none" and cuda_ver == "none":
+                raise RuntimeError("could not read NVIDIA driver or CUDA version")
+
+        self._try_record(timestamp, "docker_version", docker_version)
+        self._try_record(timestamp, "nvidia_driver", nvidia_versions)
+
     def record_heartbeat(self):
         version = qbittensor.__version__
         bt.logging.info(f"🫀 Recording heartbeat version: {version}")
@@ -451,10 +788,18 @@ class TelemetryService:
             bt.logging.info(f"Failed to enqueue heartbeat: {e}")
 
     def record_startup_metrics(self):
-        """Record startup system metrics (CPU family, max CPUs, max RAM, GPU count/models, NVIDIA driver/CUDA version)."""
+        """Record startup system metrics (CPU, RAM, disk, GPU identity/capability)."""
         try:
             timestamp = datetime.now(timezone.utc).isoformat()
+        except Exception as e:
+            bt.logging.warning(f"Startup metrics recording failed: {e}")
+            return
 
+        gpu_count = 0
+        gpu_models = "none"
+        self.gpu_indices = []
+
+        def cpu_ram():
             cpu_family = _get_cpu_model()
             cpu_count = psutil.cpu_count() or os.cpu_count() or 1
             total_ram = psutil.virtual_memory().total
@@ -462,98 +807,127 @@ class TelemetryService:
             self._enqueue_datapoint("system_cpu_count", timestamp, cpu_count)
             self._enqueue_datapoint("system_ram_bytes", timestamp, total_ram)
 
-            try:
-                disk_path = os.path.abspath(os.sep)
-                total_disk = psutil.disk_usage(disk_path).total
-                self._enqueue_datapoint("system_disk_bytes", timestamp, total_disk)
-            except Exception as disk_err:
-                bt.logging.debug(f"Could not read total disk size for startup telemetry: {disk_err}")
+        def disk():
+            disk_path = os.path.abspath(os.sep)
+            total_disk = psutil.disk_usage(disk_path).total
+            self._enqueue_datapoint("system_disk_bytes", timestamp, total_disk)
 
-            # GPU count + models: robust (pynvml preferred, nvidia-smi fallback) so we avoid
-            # reporting the opaque string "error" when the driver is present but pynvml had
-            # a runtime hiccup (common in some container/perm/LD_LIBRARY_PATH setups).
+        def gpu_identity():
+            nonlocal gpu_count, gpu_models
             gpu_count, gpu_models = _get_gpu_info(self.device)
             self._enqueue_datapoint("system_gpu_count", timestamp, gpu_count)
             self._enqueue_datapoint("system_gpu_models", timestamp, gpu_models)
+            if self.device != "cpu" and gpu_models in {"error", "nvidia-smi not found"}:
+                raise RuntimeError(f"GPU identity collection failed: {gpu_models}")
 
-            # NVIDIA driver + CUDA version (critical for GPU passthrough compatibility
-            # on validators; "none"/"none" when no NVIDIA present).
-            driver_ver, cuda_ver = _get_nvidia_driver_info()
-            self._enqueue_datapoint("system_gpu_driver_version", timestamp, driver_ver)
-            self._enqueue_datapoint("system_cuda_version", timestamp, cuda_ver)
+        def gpu_capability():
+            # Must run before the long-lived nvmlInit() below (this path init/shutdowns NVML).
+            static_infos = _get_gpu_static_info(self.device)
+            for info in static_infos:
+                self._enqueue_gpu_metric(
+                    "system_gpu_memory_bytes", timestamp, info.memory_total_bytes, info.index
+                )
+                self._enqueue_gpu_metric(
+                    "system_gpu_compute_capability", timestamp, info.compute_capability, info.index
+                )
+                self._enqueue_gpu_metric(
+                    "system_gpu_power_limit_watts", timestamp, info.power_limit_watts, info.index
+                )
+                self._enqueue_gpu_metric(
+                    "system_gpu_power_default_limit_watts",
+                    timestamp,
+                    info.power_default_limit_watts,
+                    info.index,
+                )
+                self._enqueue_gpu_metric(
+                    "system_gpu_power_max_limit_watts",
+                    timestamp,
+                    info.power_max_limit_watts,
+                    info.index,
+                )
+            self.gpu_indices = [info.index for info in static_infos] or _discover_gpu_indices(
+                self.device
+            )
+            if gpu_count > 0 and not static_infos and self.device != "cpu":
+                raise RuntimeError("had GPU identity but no capability snapshot")
 
-            # Store GPU indices *only* for periodic metrics (which require live pynvml handles).
-            # We do a temporary init/shutdown (like _get_gpu_info) to discover devices,
-            # then perform a persistent nvmlInit() so that record_system_metrics can use
-            # the handles without re-initializing every time. Shutdown happens only in shutdown().
-            self.gpu_indices = []
-            if NVML_AVAILABLE:
-                try:
-                    nvmlInit()
-                    try:
-                        device_count = nvmlDeviceGetCount()
-                        if self.device == "cpu":
-                            pass
-                        elif self.device.startswith("cuda:"):
-                            gpu_index = int(self.device.split(":", 1)[1])
-                            if gpu_index < device_count:
-                                self.gpu_indices = [gpu_index]
-                        else:
-                            self.gpu_indices = list(range(device_count))
-                    finally:
-                        try:
-                            nvmlShutdown()
-                        except Exception:
-                            pass
-                except Exception as e:
-                    bt.logging.warning(f"Could not populate GPU indices for periodic metrics (pynvml): {e}")
-                    self.gpu_indices = []
-
-            # Long-lived init for periodic GPU metrics (init once, shutdown only on service exit)
-            if self.gpu_indices and not self._pynvml_initialized:
+        def gpu_nvml_session():
+            if self.gpu_indices and NVML_AVAILABLE and not self._pynvml_initialized:
                 try:
                     nvmlInit()
                     self._pynvml_initialized = True
                 except Exception as e:
-                    bt.logging.warning(f"Failed to keep pynvml initialized for periodic GPU metrics: {e}")
                     self.gpu_indices = []
                     self._pynvml_initialized = False
-        except Exception as e:
-            bt.logging.warning(f"Startup metrics recording failed: {e}")
+                    raise RuntimeError(f"failed to keep pynvml initialized: {e}") from e
+
+        self._try_record(timestamp, "cpu_ram", cpu_ram)
+        self._try_record(timestamp, "disk", disk)
+        self._try_record(timestamp, "gpu_identity", gpu_identity)
+        self._record_updatable_host_info(timestamp)
+        self._try_record(timestamp, "gpu_capability", gpu_capability)
+        self._try_record(timestamp, "gpu_nvml_session", gpu_nvml_session)
 
     def record_system_metrics(self):
-        """Record periodic system metrics (CPU/RAM/disk usage, GPU util/memory)."""
+        """Record periodic system metrics (CPU/RAM/disk, GPU live, docker/driver/CUDA)."""
         try:
             timestamp = datetime.now(timezone.utc).isoformat()
+        except Exception as e:
+            bt.logging.warning(f"System metrics recording failed: {e}")
+            return
+
+        def cpu_ram():
             cpu_usage = psutil.cpu_percent(interval=1)
             ram_usage = psutil.virtual_memory().percent
             self._enqueue_datapoint("system_cpu_usage", timestamp, cpu_usage)
             self._enqueue_datapoint("system_ram_usage", timestamp, ram_usage)
 
-            try:
-                disk_path = os.path.abspath(os.sep)
-                disk = psutil.disk_usage(disk_path)
-                disk_usage = float(disk.percent)
-                self._enqueue_datapoint("system_disk_usage", timestamp, disk_usage)
-            except Exception as disk_err:
-                bt.logging.debug(f"Could not read disk usage for telemetry: {disk_err}")
+        def disk():
+            disk_path = os.path.abspath(os.sep)
+            disk = psutil.disk_usage(disk_path)
+            self._enqueue_datapoint("system_disk_usage", timestamp, float(disk.percent))
 
-            # GPU metrics (pynvml kept initialized for the lifetime of the service)
-            if self.gpu_indices and self._pynvml_initialized:
-                try:
-                    for i in self.gpu_indices:
-                        handle = nvmlDeviceGetHandleByIndex(i)
-                        util = nvmlDeviceGetUtilizationRates(handle).gpu
-                        mem_info = nvmlDeviceGetMemoryInfo(handle)
-                        mem_usage = (mem_info.used / mem_info.total) * 100
-                        self._enqueue_datapoint("system_gpu_utilization", timestamp, util, attributes={"gpu_index": i})
-                        self._enqueue_datapoint("system_gpu_memory_usage", timestamp, mem_usage, attributes={"gpu_index": i})
-                except Exception as gpu_err:
-                    bt.logging.debug(f"Periodic GPU metrics pynvml query failed: {gpu_err}")
+        def gpu_runtime():
+            if not (self.gpu_indices and self._pynvml_initialized):
+                return
+            infos = _get_gpu_runtime_info(self.gpu_indices)
+            for info in infos:
+                self._enqueue_gpu_metric(
+                    "system_gpu_utilization", timestamp, info.utilization, info.index
+                )
+                self._enqueue_gpu_metric(
+                    "system_gpu_memory_usage",
+                    timestamp,
+                    info.memory_usage_percent,
+                    info.index,
+                )
+                self._enqueue_gpu_metric(
+                    "system_gpu_power_draw_watts",
+                    timestamp,
+                    info.power_draw_watts,
+                    info.index,
+                )
+                self._enqueue_gpu_metric(
+                    "system_gpu_power_limit_watts",
+                    timestamp,
+                    info.power_limit_watts,
+                    info.index,
+                )
+                self._enqueue_gpu_metric(
+                    "system_gpu_temperature_c", timestamp, info.temperature_c, info.index
+                )
+                self._enqueue_gpu_metric(
+                    "system_gpu_throttle_reasons",
+                    timestamp,
+                    info.throttle_reasons,
+                    info.index,
+                )
 
-            bt.logging.info("System metrics sent")
-        except Exception as e:
-            bt.logging.warning(f"System metrics recording failed: {e}")
+        self._try_record(timestamp, "cpu_ram", cpu_ram)
+        self._try_record(timestamp, "disk", disk)
+        self._record_updatable_host_info(timestamp)
+        self._try_record(timestamp, "gpu_runtime", gpu_runtime)
+        bt.logging.info("System metrics sent")
 
     def record_event(
         self,

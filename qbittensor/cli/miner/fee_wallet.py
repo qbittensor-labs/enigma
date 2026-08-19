@@ -35,7 +35,8 @@ from pathlib import Path
 from typing import Any
 
 import bittensor as bt
-from bittensor_wallet import Keyfile, Keypair
+from bittensor.wallet import Keypair
+from bittensor.keyfiles import Keyfile
 
 
 def load_fee_keypair_from_wallet(
@@ -107,5 +108,5 @@ def load_fee_keypair_from_keyfile(
             f"Failed to load fee coldkey from {path}.\n"
             f"Error: {e}\n\n"
             "If the keyfile is password-protected, make sure you can unlock it "
-            "(WALLET_PASSWORD env var is supported by bittensor_wallet)."
+            "(BT_WALLET_PASSWORD / WALLET_PASSWORD env vars are supported by bittensor)."
         ) from e

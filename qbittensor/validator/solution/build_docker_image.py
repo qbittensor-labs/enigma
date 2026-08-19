@@ -58,11 +58,15 @@ def build_image(image_name: str, dockerfile_dir: str = ".", build_log_path: Opti
     """
     Build the miner solution Docker image.
 
-    Uses ``--progress=plain`` so the output is line-oriented and suitable for
-    persistent logs (no TTY progress bars). When ``build_log_path`` is provided,
-    the full build transcript (stdout+stderr combined) is written to that file
-    **regardless of success or failure**. This allows the build logs to be
-    included in the platform log package (via ``log_data_key``) for diagnostics.
+    Uses BuildKit ``--progress=plain`` so the output is line-oriented and
+    suitable for persistent logs (no TTY progress bars). Validators must have
+    Docker Engine with the buildx plugin (BuildKit); the legacy builder is not
+    supported. Startup checks ``is_docker_available()`` for this.
+
+    When ``build_log_path`` is provided, the full build transcript
+    (stdout+stderr combined) is written to that file **regardless of success or
+    failure**. This allows the build logs to be included in the platform log
+    package (via ``log_data_key``) for diagnostics.
 
     The build log is written to e.g. ``<workspace>/output/docker_build.log``.
     """
@@ -72,6 +76,8 @@ def build_image(image_name: str, dockerfile_dir: str = ".", build_log_path: Opti
         bt.logging.info(f"\tBuild log: {build_log_path}")
 
     build_cmd = ["build", "--progress=plain", "-t", image_name, dockerfile_dir]
+    # Force BuildKit even if the operator has DOCKER_BUILDKIT=0 in the environment.
+    build_env = {**os.environ, "DOCKER_BUILDKIT": "1", "BUILDKIT_PROGRESS": "plain"}
 
     build_output_lines: list[str] = []
     ops = DockerOps()
@@ -85,6 +91,7 @@ def build_image(image_name: str, dockerfile_dir: str = ".", build_log_path: Opti
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,  # line buffered
+            env=build_env,
         )
 
         try:
@@ -212,7 +219,7 @@ def _write_build_log(
         with open(build_log_path, "w", encoding="utf-8", errors="replace") as f:
             f.write(f"# Docker build log\n")
             f.write(f"# Command: {' '.join(build_cmd)}\n")
-            f.write(f"# Captured with --progress=plain\n\n")
+            f.write(f"# Captured with --progress=plain (BuildKit required)\n\n")
             f.writelines(output_lines)
         bt.logging.info(f"\t📝 Wrote build log to {build_log_path}")
     except Exception as e:

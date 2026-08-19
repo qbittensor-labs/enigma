@@ -31,7 +31,7 @@ SOLUTIONS_BASE_DIR: str = "data/solutions"
 CONTAINER_OUTPUT_DIRNAME: str = "output"
 CONTAINER_SOLUTION_DIRNAME: str = "solution_artifacts"
 
-# Docker build logs (captured with --progress=plain) are written here so they
+# Docker build logs (captured with --progress=plain; BuildKit/buildx required) are written here so they
 # can be included in the log package uploaded via log_data_key for diagnostics,
 # whether the build succeeded or failed.
 DOCKER_BUILD_LOG_FILENAME: str = "docker_build.log"

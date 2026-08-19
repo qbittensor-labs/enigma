@@ -29,6 +29,7 @@ from neurons.validator import (
     MIN_DUST_FLOOR,
     Validator,
 )
+from qbittensor.utils.treasury_sinks import TREASURY_SINK_HOTKEYS
 
 from qbittensor.base.utils.weight_utils import (
     process_weights_for_netuid,
@@ -86,21 +87,17 @@ def mock_validator(mock_config):
         mock_wallet.return_value = Mock()
         mock_wallet.return_value.hotkey.ss58_address = "test_hotkey"
         mock_subtensor.return_value = Mock()
-        mock_metagraph.return_value = Mock()
-        mock_metagraph.return_value.configure_mock(
+        from tests.bt_v11_helpers import wire_v11_subtensor
+
+        mock_mg = wire_v11_subtensor(
+            mock_subtensor.return_value,
             hotkeys=["test_hotkey", "hotkey1", "miner_hotkey"],
+            netuid=1,
+            stakes=[1000.0, 100.0, 50.0],
             last_update=[0, 0, 0],
-            uids=np.array([0, 1, 2]),
-            axons=[Mock(), Mock(), Mock()],
+            max_weight_limit=1.0,
         )
-        mock_metagraph.return_value.n = 3
-        mock_subtensor.return_value.metagraph.return_value = mock_metagraph.return_value
-        mock_subtensor.return_value.block = Mock(return_value=1000)
-        mock_subtensor.return_value.min_allowed_weights = Mock(return_value=1)
-        mock_subtensor.return_value.max_weight_limit = Mock(return_value=1000)
-        mock_subtensor.return_value.set_weights = Mock(return_value=(True, "success"))
-        mock_subtensor.is_hotkey_registered.return_value = True
-        mock_subtensor.serve_axon.return_value = None
+        mock_metagraph.return_value = mock_mg
 
         mock_dendrite.return_value = Mock()
         mock_dendrite.return_value._session = None
@@ -229,8 +226,10 @@ class TestSetWeights:
             raw_weights = scores / norm
 
             mock_st = mock_validator.subtensor
-            mock_st.min_allowed_weights.return_value = 1
-            mock_st.max_weight_limit.return_value = 1.0
+            from tests.bt_v11_helpers import make_hyperparameters
+            mock_st.hyperparameters = make_hyperparameters(
+                min_allowed_weights=1, max_weight_limit=1.0
+            )
 
             processed_uids, processed_w = process_weights_for_netuid(
                 uids=mock_validator.metagraph.uids,
@@ -300,8 +299,10 @@ class TestSetWeights:
         raw_weights = scores / norm
 
         mock_st = mock_validator.subtensor
-        mock_st.min_allowed_weights.return_value = 1
-        mock_st.max_weight_limit.return_value = 1.0
+        from tests.bt_v11_helpers import make_hyperparameters
+        mock_st.hyperparameters = make_hyperparameters(
+            min_allowed_weights=1, max_weight_limit=1.0
+        )
 
         processed_uids, processed_w = process_weights_for_netuid(
             uids=mock_validator.metagraph.uids,
@@ -371,8 +372,10 @@ class TestSetWeights:
         raw_weights = scores / norm
 
         mock_st = mock_validator.subtensor
-        mock_st.min_allowed_weights.return_value = 1
-        mock_st.max_weight_limit.return_value = 1.0
+        from tests.bt_v11_helpers import make_hyperparameters
+        mock_st.hyperparameters = make_hyperparameters(
+            min_allowed_weights=1, max_weight_limit=1.0
+        )
 
         processed_uids, processed_w = process_weights_for_netuid(
             uids=mock_validator.metagraph.uids,
@@ -437,8 +440,10 @@ class TestSetWeights:
         raw_weights = scores / norm
 
         mock_st = mock_validator.subtensor
-        mock_st.min_allowed_weights.return_value = 1
-        mock_st.max_weight_limit.return_value = 1.0
+        from tests.bt_v11_helpers import make_hyperparameters
+        mock_st.hyperparameters = make_hyperparameters(
+            min_allowed_weights=1, max_weight_limit=1.0
+        )
 
         processed_uids, processed_w = process_weights_for_netuid(
             uids=mock_validator.metagraph.uids,
@@ -461,6 +466,129 @@ class TestSetWeights:
         emitted = dict(zip([int(u) for u in uint_uids], uint_weights))
         assert emitted.get(private_uid, 0) > 0, "Private miner dust was zeroed"
 
+        mock_super.assert_called_once()
+
+    def test_set_weights_dusts_idle_treasury_sinks(self, mock_validator):
+        """Idle sinks stay above 0 so a full-subnet recycle cannot pick them."""
+        active = TREASURY_SINK_HOTKEYS[0]
+        idle = list(TREASURY_SINK_HOTKEYS[1:])
+        hotkeys = [active, *idle, PRIVATE_MINER_HOTKEY]
+        mock_validator.metagraph.hotkeys = hotkeys
+        mock_validator.metagraph.n = len(hotkeys)
+        mock_validator.metagraph.uids = np.arange(len(hotkeys), dtype=np.int64)
+        mock_validator.database_connection.db_query.get_active_miners.return_value = []
+
+        jwt = Mock()
+        jwt.sink_hotkey = active
+        jwt.tempo_id = 2
+        rm = Mock()
+        rm.jwt = jwt
+        mock_validator.platform_client.request_manager = rm
+        mock_validator.subtensor.block = 720
+
+        with patch("neurons.validator.BaseValidatorNeuron.set_weights") as mock_super:
+            mock_validator.set_weights()
+
+        weights = mock_validator.scores
+        assert weights[mock_validator.metagraph.hotkeys.index(active)] >= 0.999
+        for hk in idle:
+            assert weights[mock_validator.metagraph.hotkeys.index(hk)] >= MIN_DUST_FLOOR
+        mock_super.assert_called_once()
+
+    def test_set_weights_uses_platform_sink_when_listed(self, mock_validator):
+        listed = TREASURY_SINK_HOTKEYS[2]
+        mock_validator.metagraph.hotkeys = [listed, "miner1", PRIVATE_MINER_HOTKEY]
+        mock_validator.database_connection.db_query.get_active_miners.return_value = []
+
+        jwt = Mock()
+        jwt.sink_hotkey = listed
+        jwt.tempo_id = 2
+        rm = Mock()
+        rm.jwt = jwt
+        mock_validator.platform_client.request_manager = rm
+        mock_validator.subtensor.block = 720  # 720 // 360 == 2
+
+        with patch("neurons.validator.BaseValidatorNeuron.set_weights") as mock_super:
+            mock_validator.set_weights()
+
+        weights = mock_validator.scores
+        sink_uid = mock_validator.metagraph.hotkeys.index(listed)
+        assert weights[sink_uid] >= 0.999
+        rm.refresh_jwt.assert_not_called()
+        mock_super.assert_called_once()
+
+    def test_set_weights_defaults_to_first_when_platform_sink_unknown(self, mock_validator):
+        unknown = "5NotATreasurySinkHotkeyXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+        mock_validator.metagraph.hotkeys = [TREASURY_HOTKEY, unknown, PRIVATE_MINER_HOTKEY]
+        mock_validator.database_connection.db_query.get_active_miners.return_value = []
+
+        jwt = Mock()
+        jwt.sink_hotkey = unknown
+        jwt.tempo_id = 2
+        refreshed = Mock()
+        refreshed.sink_hotkey = unknown
+        refreshed.tempo_id = 2
+        rm = Mock()
+        rm.jwt = jwt
+        rm.refresh_jwt.return_value = refreshed
+        mock_validator.platform_client.request_manager = rm
+        mock_validator.subtensor.block = 720
+
+        with patch("neurons.validator.BaseValidatorNeuron.set_weights") as mock_super:
+            mock_validator.set_weights()
+
+        weights = mock_validator.scores
+        default_uid = mock_validator.metagraph.hotkeys.index(TREASURY_HOTKEY)
+        unknown_uid = mock_validator.metagraph.hotkeys.index(unknown)
+        assert weights[default_uid] >= 0.999
+        assert weights[unknown_uid] == 0.0
+        mock_super.assert_called_once()
+
+    def test_set_weights_defaults_to_first_when_sink_missing(self, mock_validator):
+        mock_validator.metagraph.hotkeys = [TREASURY_HOTKEY, "miner1", PRIVATE_MINER_HOTKEY]
+        mock_validator.database_connection.db_query.get_active_miners.return_value = []
+
+        jwt = Mock()
+        jwt.sink_hotkey = None
+        jwt.tempo_id = None
+        rm = Mock()
+        rm.jwt = jwt
+        rm.refresh_jwt.side_effect = RuntimeError("tensorauth down")
+        mock_validator.platform_client.request_manager = rm
+
+        with patch("neurons.validator.BaseValidatorNeuron.set_weights") as mock_super:
+            mock_validator.set_weights()
+
+        weights = mock_validator.scores
+        default_uid = mock_validator.metagraph.hotkeys.index(TREASURY_HOTKEY)
+        assert weights[default_uid] >= 0.999
+        mock_super.assert_called_once()
+
+    def test_set_weights_refreshes_jwt_when_tempo_changes(self, mock_validator):
+        old_sink = TREASURY_SINK_HOTKEYS[1]
+        new_sink = TREASURY_SINK_HOTKEYS[3]
+        mock_validator.metagraph.hotkeys = [old_sink, new_sink, PRIVATE_MINER_HOTKEY]
+        mock_validator.database_connection.db_query.get_active_miners.return_value = []
+
+        stale = Mock()
+        stale.sink_hotkey = old_sink
+        stale.tempo_id = 1
+        fresh = Mock()
+        fresh.sink_hotkey = new_sink
+        fresh.tempo_id = 2
+        rm = Mock()
+        rm.jwt = stale
+        rm.refresh_jwt.return_value = fresh
+        mock_validator.platform_client.request_manager = rm
+        mock_validator.subtensor.block = 720  # tempo 2
+
+        with patch("neurons.validator.BaseValidatorNeuron.set_weights") as mock_super:
+            mock_validator.set_weights()
+
+        weights = mock_validator.scores
+        assert weights[mock_validator.metagraph.hotkeys.index(new_sink)] >= 0.999
+        assert weights[mock_validator.metagraph.hotkeys.index(old_sink)] >= MIN_DUST_FLOOR
+        rm.refresh_jwt.assert_called_once()
         mock_super.assert_called_once()
 
 

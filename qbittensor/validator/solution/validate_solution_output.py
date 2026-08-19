@@ -23,7 +23,12 @@ import requests
 
 import bittensor as bt
 from qbittensor.dto.challenge import ChallengeSubmissionVerifyUploadAddressResponse
-from qbittensor.utils.solution_status import SolutionStatus, ValidationFailureReason
+from qbittensor.utils.solution_status import (
+    OutputExtractionStatus,
+    SolutionStatus,
+    ValidationFailureReason,
+    failure_reason_for_extraction,
+)
 from qbittensor.challenges.solution_output import SOLUTION_LOG_FILENAME
 from qbittensor.validator.solution.constants import (
     CONTAINER_OUTPUT_DIRNAME,
@@ -41,6 +46,9 @@ def validate_solution(
     submission_id: str,
     challenge_milestone_id: str,
     challenge_id: str,
+    *,
+    exit_code: int = -1,
+    extraction: OutputExtractionStatus | None = None,
 ) -> str:
     """Validate the output of the solution.
 
@@ -53,6 +61,11 @@ def validate_solution(
             validation runs, because the platform submission happened before execution).
         challenge_milestone_id, challenge_id: These stable values (from the
             SolutionPostProcessInfo.execution) are always present for completed solutions.
+        exit_code: Container exit code from docker inspect. Used with *extraction*
+            to distinguish a crash from a completed run that produced no artifacts.
+        extraction: Result of ``extract_stdout_output``. When this is not
+            ``ARTIFACTS_EXTRACTED``, challenge output validation is skipped and a
+            more specific failure reason is reported.
 
     Returns:
         Solution status string (e.g. ``SolutionStatus.SUCCESS`` which is now "Success").
@@ -87,6 +100,8 @@ def validate_solution(
         submission_id=submission_id,
         challenge_milestone_id=challenge_milestone_id,
         challenge_id=challenge_id,
+        exit_code=exit_code,
+        extraction=extraction,
     )
     return solution_status
 
@@ -115,6 +130,8 @@ def perform_solution_output_validation(
     challenge_milestone_id: str,
     challenge_id: str,
     logs_uploaded: bool = True,
+    exit_code: int = -1,
+    extraction: OutputExtractionStatus | None = None,
 ) -> str:
     """
     Perform the actual validation of the solution output.
@@ -127,69 +144,86 @@ def perform_solution_output_validation(
     challenge_milestone_id, challenge_id) from the SolutionPostProcessInfo
     (via its embedded SolutionExecution or the convenience properties).
     No DB lookups (path-based or otherwise) are performed inside this function.
+
+    When *extraction* is provided and is not ARTIFACTS_EXTRACTED, challenge
+    output validation is skipped and the failure is classified from the
+    extraction result + container exit code.
     """
 
     bt.logging.info(f"🛡️ Performing validation of solution output at '{container_output_path}'")
     solution_folder_path = os.path.join(container_output_path, CONTAINER_SOLUTION_DIRNAME)
-    success, validation_failure_reason = validate_output(solution_folder_path, challenge_id)
 
-    output_uploaded = False
+    extraction_failure = (
+        failure_reason_for_extraction(extraction, exit_code) if extraction is not None else None
+    )
 
-    if success:
-        bt.logging.info("\t✅ Solution output valid")
-        bt.logging.info("📤 Attempting upload of solution output artifacts (validation passed)...")
-        output_uploaded = upload_zip_to_platform(
-            solution_folder_path, solution_output_data, "solution_output", zip_entire_directory=True
-        )
-
-        report_payload = {
-            "status": "Success",
-            "log_data_key": logs_data.id if logs_uploaded else None,
-            "output_data_key": solution_output_data.id if output_uploaded else None,
-        }
-        if challenges_client.report_submission_status(
-            submission_id,
-            report_payload["status"],
-            log_data_key=report_payload["log_data_key"],
-            output_data_key=report_payload["output_data_key"],
-        ):
-            bt.logging.info("\t✅ Successfully updated platform with successful validation status")
-            return SolutionStatus.SUCCESS.value
-        else:
-            return ValidationFailureReason.UPLOAD_FAILURE.value
-
-    else:
-        bt.logging.info("\t❌ Solution output invalid")
-
-        bt.logging.info("📤 Attempting upload of solution output artifacts (validation failed) for diagnostics...")
-        try:
+    if extraction_failure is None:
+        success, validation_failure_reason = validate_output(solution_folder_path, challenge_id)
+        if success:
+            bt.logging.info("\t✅ Solution output valid")
+            bt.logging.info("📤 Attempting upload of solution output artifacts (validation passed)...")
             output_uploaded = upload_zip_to_platform(
                 solution_folder_path, solution_output_data, "solution_output", zip_entire_directory=True
             )
-        except Exception as upload_exc:
-            bt.logging.warning(f"⚠️ Failed to upload solution artifacts on failure path: {upload_exc}")
-            output_uploaded = False
 
-        failure_message = validation_failure_reason or "Output validation failed (see uploaded container.log and solution_output artifacts for details)"
-        failure_message = f"Milestone {challenge_milestone_id}: {failure_message}"
+            report_payload = {
+                "status": "Success",
+                "log_data_key": logs_data.id if logs_uploaded else None,
+                "output_data_key": solution_output_data.id if output_uploaded else None,
+            }
+            if challenges_client.report_submission_status(
+                submission_id,
+                report_payload["status"],
+                log_data_key=report_payload["log_data_key"],
+                output_data_key=report_payload["output_data_key"],
+            ):
+                bt.logging.info("\t✅ Successfully updated platform with successful validation status")
+                return SolutionStatus.SUCCESS.value
+            else:
+                return ValidationFailureReason.UPLOAD_FAILURE.value
 
-        report_payload = {
-            "status": "Failure",
-            "log_data_key": logs_data.id if logs_uploaded else None,
-            "output_data_key": solution_output_data.id if output_uploaded else None,
-        }
-        if challenges_client.report_submission_status(
-            submission_id,
-            report_payload["status"],
-            reason=failure_message,
-            log_data_key=report_payload["log_data_key"],
-            output_data_key=report_payload["output_data_key"],
-            failure_reason=ValidationFailureReason.INCORRECT_FAILURE.value,
-        ):
-            bt.logging.info("\t✅ Successfully updated platform with failed validation status")
-            return ValidationFailureReason.INCORRECT_FAILURE.value
-        else:
-            return ValidationFailureReason.UPLOAD_FAILURE.value
+        failure_reason = ValidationFailureReason.INCORRECT_FAILURE
+        failure_message = validation_failure_reason or (
+            "Output validation failed (see uploaded container.log and solution_output artifacts for details)"
+        )
+        bt.logging.info("\t❌ Solution output invalid")
+    else:
+        failure_reason = extraction_failure
+        failure_message = extraction_failure.default_message
+        bt.logging.info(
+            f"\t❌ Solution output not usable for challenge validation "
+            f"(extraction={extraction}, exit_code={exit_code}) → {failure_reason.value}"
+        )
+
+    bt.logging.info("📤 Attempting upload of solution output artifacts (validation failed) for diagnostics...")
+    output_uploaded = False
+    try:
+        output_uploaded = upload_zip_to_platform(
+            solution_folder_path, solution_output_data, "solution_output", zip_entire_directory=True
+        )
+    except Exception as upload_exc:
+        bt.logging.warning(f"⚠️ Failed to upload solution artifacts on failure path: {upload_exc}")
+        output_uploaded = False
+
+    failure_message = f"Milestone {challenge_milestone_id}: {failure_message}"
+
+    report_payload = {
+        "status": "Failure",
+        "log_data_key": logs_data.id if logs_uploaded else None,
+        "output_data_key": solution_output_data.id if output_uploaded else None,
+    }
+    if challenges_client.report_submission_status(
+        submission_id,
+        report_payload["status"],
+        reason=failure_message,
+        log_data_key=report_payload["log_data_key"],
+        output_data_key=report_payload["output_data_key"],
+        failure_reason=failure_reason.value,
+    ):
+        bt.logging.info("\t✅ Successfully updated platform with failed validation status")
+        return failure_reason.value
+    else:
+        return ValidationFailureReason.UPLOAD_FAILURE.value
 
 
 def upload_zip_to_platform(
@@ -282,7 +316,7 @@ def upload_logs_package(
     upload it using the provided presigned platform upload slot.
 
     The package intentionally includes:
-      - docker_build.log (always written with --progress=plain before/during build)
+      - docker_build.log (always written with --progress=plain before/during build; BuildKit required)
       - SOLUTION_LOG_FILENAME (full docker logs output, including both stdout and stderr)
       - Any *diagnostics*.txt files (e.g. extraction failures)
 

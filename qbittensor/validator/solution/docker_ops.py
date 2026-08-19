@@ -295,28 +295,8 @@ class DockerOps:
     # ------------------------------------------------------------------
     @classmethod
     def check_available(cls) -> bool:
-        """Same logic as the old is_docker_available, but as a classmethod."""
-        try:
-            result = subprocess.run(
-                ["docker", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                version = result.stdout.strip()
-                bt.logging.info(f"🐳 Docker CLI detected: {version}")
-                return True
-            else:
-                # (keep the detailed logging from the original function if desired)
-                bt.logging.error("❌ Docker CLI check failed.")
-                return False
-        except FileNotFoundError:
-            bt.logging.error("❌ Docker CLI not found in PATH.")
-            return False
-        except subprocess.TimeoutExpired:
-            bt.logging.error("❌ Docker CLI check timed out.")
-            return False
-        except Exception as e:
-            bt.logging.error(f"❌ Unexpected error while checking Docker availability: {e}")
-            return False
+        """Delegate to the shared startup check (CLI + BuildKit/buildx)."""
+        # Imported lazily to avoid a circular import at module load time.
+        from qbittensor.validator.solution.solution_container_manager import is_docker_available
+
+        return is_docker_available()

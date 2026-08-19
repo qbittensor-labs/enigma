@@ -48,7 +48,7 @@ _api_cfg = get_api_config()
 import bittensor as bt
 import click
 import requests
-from bittensor_wallet import Keypair
+from bittensor.wallet import Keypair
 
 from qbittensor.database.db_connection import DBConnection
 from rich import box
@@ -152,7 +152,7 @@ def _resolve_cli_api_auth(
     )
 
 
-def _load_signing_keypair(console: Console, auth: CliApiAuth) -> bt.Keypair:
+def _load_signing_keypair(console: Console, auth: CliApiAuth) -> Keypair:
     """Return the keypair ``RequestManager`` uses to sign API requests.
 
     The only supported ways to configure the signing key are:
@@ -575,6 +575,11 @@ def run_milestone_solution_upload(
         )
 
     try:
+        fee_wallet = bt.Wallet(
+            name=api_auth.wallet_name,
+            hotkey=api_auth.wallet_hotkey,
+            path=api_auth.wallet_path,
+        )
         submit_solution(
             console,
             milestone_id,
@@ -586,6 +591,7 @@ def run_milestone_solution_upload(
             network=api_auth.network,
             challenge_id=challenge_id,
             fee_tao=price_tao,
+            fee_wallet=fee_wallet,
         )
     except click.exceptions.Exit:
         raise
@@ -607,6 +613,7 @@ def submit_solution(
     network: str,
     challenge_id: str,
     fee_tao: float | None = None,
+    fee_wallet: Any | None = None,
 ) -> dict[str, Any]:
 
     """Request slot, upload zip to storage, transfer fee (as batch + remark), then persist DB row.
@@ -768,6 +775,7 @@ def submit_solution(
         miner_hotkey=miner_hotkey,
         milestone_id=milestone_id,
         upload_endpoint_id=str(upload_id) if upload_id else "",
+        wallet=fee_wallet,
     )
     tx_hash = proof_tx.extrinsic_hash
     transfer_block_hash = proof_tx.block_hash
