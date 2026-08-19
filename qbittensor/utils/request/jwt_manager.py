@@ -17,7 +17,7 @@
 
 import base64
 import json
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 import bittensor as bt
 from time import time
 from pydantic import BaseModel
@@ -34,6 +34,8 @@ JWT_ENDPOINT: str = "token"
 class KeycloakJWT(BaseModel):
     access_token: str
     expires_in: int
+    sink_hotkey: Optional[str] = None
+    tempo_id: Optional[int] = None
 
 
 class JWT(KeycloakJWT):
@@ -44,11 +46,11 @@ class JWTManager:
 
     def __init__(
         self,
-        keypair: bt.Keypair,
+        keypair: Any,
         netuid: int,
         tensorauth_url: Optional[str] = None,
     ) -> None:
-        self._keypair: bt.Keypair = keypair
+        self._keypair: Any = keypair
         self._netuid: int = netuid
         self._timeout: float = 7.0
         self._session: requests.Session = make_session(allowed_methods=["GET"])

@@ -47,6 +47,76 @@ from qbittensor.utils.services.telemetry import TelemetryService
 from .solution_context import SolutionExecution
 
 
+def _report_pre_container_failure(
+    *,
+    platform_client: ChallengesClient | None,
+    db_conn: DBConnection,
+    execution: SolutionExecution | None,
+    submission_id: str | None,
+    absolute_path_to_host_folder: str | None,
+    did_insert_solution: bool,
+    did_start_solution: bool,
+    failure_reason: ValidationFailureReason,
+    reason: str,
+) -> None:
+    """Persist a local status and PATCH Failure so the platform row cannot stay Running.
+
+    Used for both InvalidSolutionError (granular reason) and unexpected exceptions
+    (InternalFailure) that happen before the container is marked RUNNING.
+    """
+    if did_insert_solution and not did_start_solution and execution is not None:
+        db_conn.db_query.update_challenge_solution_status_by_id(
+            solution_id=execution.solution_id,
+            solution_status=failure_reason.value,
+        )
+
+    if not platform_client:
+        bt.logging.warning("No platform_client provided — could not report failure status to platform")
+        return
+
+    sub_for_report = execution.submission_id if execution is not None else (submission_id or "")
+    if not sub_for_report:
+        bt.logging.warning("No submission_id available — cannot report failure status to platform")
+        return
+
+    log_data_key: str | None = None
+    if absolute_path_to_host_folder:
+        try:
+            logs_data = establish_upload_locations_for_solution_data(
+                absolute_path_to_host_folder, "solution_logs", platform_client
+            )
+            if logs_data:
+                uploaded = upload_logs_package(
+                    os.path.join(absolute_path_to_host_folder, CONTAINER_OUTPUT_DIRNAME),
+                    logs_data,
+                )
+                if uploaded:
+                    log_data_key = logs_data.id
+                    bt.logging.info(
+                        f"📤 Uploaded early failure logs package for submission {sub_for_report} "
+                        f"(log_data_key={log_data_key})"
+                    )
+                else:
+                    bt.logging.warning("⚠️ Early failure logs package upload returned false")
+            else:
+                bt.logging.warning("⚠️ Could not establish upload location for early failure logs")
+        except Exception as upload_exc:
+            bt.logging.warning(f"⚠️ Failed to upload early failure logs package: {upload_exc}")
+
+    bt.logging.info(
+        f"📤 Reporting Failure to platform (submission_id={sub_for_report}) "
+        f"failure_reason={failure_reason.value} "
+        f"with log_data_key={'present' if log_data_key else 'None'}"
+    )
+    platform_client.report_submission_status(
+        submission_id=sub_for_report,
+        status="Failure",
+        reason=reason[:2000],
+        log_data_key=log_data_key,
+        failure_reason=failure_reason.value,
+    )
+
+
 def run_solution_management(
     db_conn: DBConnection,
     validator_label: str,
@@ -110,6 +180,17 @@ def run_solution_management(
         )
         if not solution_id:
             bt.logging.error("Failed to insert pending challenge solution.")
+            _report_pre_container_failure(
+                platform_client=platform_client,
+                db_conn=db_conn,
+                execution=None,
+                submission_id=submission_id,
+                absolute_path_to_host_folder=None,
+                did_insert_solution=False,
+                did_start_solution=False,
+                failure_reason=ValidationFailureReason.INTERNAL_FAILURE,
+                reason="Failed to insert pending challenge solution in the local validator database.",
+            )
             return None, None, None
         did_insert_solution = True
 
@@ -242,60 +323,41 @@ def run_solution_management(
         tb = traceback.format_exc()
         if tb and "NoneType: None" not in tb:
             rich_reason += f"\n\nTraceback:\n{tb}"
-
-        if did_insert_solution and not did_start_solution and execution is not None:
-            # We constructed the SolutionExecution (with stable id) only on successful create.
-            fr = e.failure_reason or ValidationFailureReason.INTERNAL_FAILURE  # unclassified / unexpected error
-            db_conn.db_query.update_challenge_solution_status_by_id(
-                solution_id=execution.solution_id,
-                solution_status=fr.value,
-            )
-
-        log_data_key: str | None = None
-        if platform_client:
-            sub_for_report = execution.submission_id if execution is not None else (submission_id or "")
-
-            # Best-effort: if we have a workspace (created early), upload the logs package.
-            # This ensures docker build logs (and any other logs written before failure)
-            # are available via log_data_key even when the failure happened before the
-            # container ever ran (e.g. during build, code validation, etc.).
-            if absolute_path_to_host_folder:
-                try:
-                    logs_data = establish_upload_locations_for_solution_data(
-                        absolute_path_to_host_folder, "solution_logs", platform_client
-                    )
-                    if logs_data:
-                        uploaded = upload_logs_package(
-                            os.path.join(absolute_path_to_host_folder, CONTAINER_OUTPUT_DIRNAME),
-                            logs_data,
-                        )
-                        if uploaded:
-                            log_data_key = logs_data.id
-                            bt.logging.info(
-                                f"📤 Uploaded early failure logs package for submission {sub_for_report} "
-                                f"(log_data_key={log_data_key})"
-                            )
-                        else:
-                            bt.logging.warning("⚠️ Early failure logs package upload returned false")
-                    else:
-                        bt.logging.warning("⚠️ Could not establish upload location for early failure logs")
-                except Exception as upload_exc:
-                    bt.logging.warning(f"⚠️ Failed to upload early failure logs package: {upload_exc}")
-
-            bt.logging.info(
-                f"📤 Reporting Failure to platform (submission_id={sub_for_report}) "
-                f"with log_data_key={'present' if log_data_key else 'None'}"
-            )
-            fr = e.failure_reason or ValidationFailureReason.INTERNAL_FAILURE  # unclassified / unexpected error
-            platform_client.report_submission_status(
-                submission_id=sub_for_report,
-                status="Failure",
-                reason=rich_reason[:2000],  # keep platform messages reasonable length
-                log_data_key=log_data_key,
-                failure_reason=fr.value,
-            )
-        else:
-            bt.logging.warning("No platform_client provided — could not report failure status to platform")
+        fr = e.failure_reason or ValidationFailureReason.INTERNAL_FAILURE
+        _report_pre_container_failure(
+            platform_client=platform_client,
+            db_conn=db_conn,
+            execution=execution,
+            submission_id=submission_id,
+            absolute_path_to_host_folder=absolute_path_to_host_folder,
+            did_insert_solution=did_insert_solution,
+            did_start_solution=did_start_solution,
+            failure_reason=fr,
+            reason=rich_reason,
+        )
+        return None, None, None
+    except Exception as e:
+        # HQP/RSA setup (and any other unexpected path) raise RuntimeError, not
+        # InvalidSolutionError. Without this catch the exception escapes to the
+        # validator run loop, local cleanup runs in finally, and the platform
+        # row is left Running forever.
+        import traceback
+        bt.logging.error(f"Unexpected error during solution setup/run: {type(e).__name__}: {e}")
+        rich_reason = f"Internal failure during solution processing: {type(e).__name__}: {e}"
+        tb = traceback.format_exc()
+        if tb and "NoneType: None" not in tb:
+            rich_reason += f"\n\nTraceback:\n{tb}"
+        _report_pre_container_failure(
+            platform_client=platform_client,
+            db_conn=db_conn,
+            execution=execution,
+            submission_id=submission_id,
+            absolute_path_to_host_folder=absolute_path_to_host_folder,
+            did_insert_solution=did_insert_solution,
+            did_start_solution=did_start_solution,
+            failure_reason=ValidationFailureReason.INTERNAL_FAILURE,
+            reason=rich_reason,
+        )
         return None, None, None
     finally:
         if not did_start_solution:
@@ -435,21 +497,54 @@ def execute_verified_solution(
 
     start_ts = time.time()
 
-    image_name, container_id, folder_name = run_solution_management(
-        db_conn=db_conn,
-        validator_label=validator_label,
-        download_url=download_url,
-        challenge_milestone_id=challenge_milestone_id,
-        challenge_validation_solution_id=challenge_validation_solution_id,
-        submission_id=submission_id,
-        tx_hash=tx_hash,
-        miner_hotkey=miner_hotkey,
-        challenge_id=challenge_id,
-        milestone_configuration=milestone_configuration,
-        platform_client=platform_client,
-        telemetry_service=telemetry_service,
-        max_solution_runtime_seconds=max_solution_runtime_seconds,
-    )
+    try:
+        image_name, container_id, folder_name = run_solution_management(
+            db_conn=db_conn,
+            validator_label=validator_label,
+            download_url=download_url,
+            challenge_milestone_id=challenge_milestone_id,
+            challenge_validation_solution_id=challenge_validation_solution_id,
+            submission_id=submission_id,
+            tx_hash=tx_hash,
+            miner_hotkey=miner_hotkey,
+            challenge_id=challenge_id,
+            milestone_configuration=milestone_configuration,
+            platform_client=platform_client,
+            telemetry_service=telemetry_service,
+            max_solution_runtime_seconds=max_solution_runtime_seconds,
+        )
+    except Exception as e:
+        # run_solution_management is supposed to catch and report, but never
+        # let an exception leave a platform Running row unreported.
+        import traceback
+        bt.logging.error(
+            f"execute_verified_solution: uncaught {type(e).__name__}: {e}"
+        )
+        rich_reason = f"Internal failure during verified execution: {type(e).__name__}: {e}"
+        tb = traceback.format_exc()
+        if tb and "NoneType: None" not in tb:
+            rich_reason += f"\n\nTraceback:\n{tb}"
+        if platform_client:
+            platform_client.report_submission_status(
+                submission_id=submission_id,
+                status="Failure",
+                reason=rich_reason[:2000],
+                log_data_key=log_data_key,
+                output_data_key=output_data_key,
+                failure_reason=ValidationFailureReason.INTERNAL_FAILURE.value,
+            )
+        if telemetry_service:
+            telemetry_service.record_event(
+                "solution_container_launched",
+                value=time.time() - start_ts,
+                miner_hotkey=miner_hotkey,
+                attributes={
+                    "submission_id": submission_id,
+                    "tx_hash": tx_hash,
+                    "outcome": "failure",
+                },
+            )
+        return None, None, None
 
     elapsed = time.time() - start_ts
     if image_name and container_id:
@@ -490,21 +585,10 @@ def execute_verified_solution(
             )
 
     if image_name is None or container_id is None or folder_name is None:
+        # run_solution_management already PATCHed Failure when it had a
+        # platform_client. Do not send a second UNKNOWN report that would
+        # 400 (already validated) or overwrite the granular reason.
         bt.logging.error(f"❌ Failed to execute verified solution for tx_hash {tx_hash}")
-        if platform_client:
-            bt.logging.info(
-                f"📤 Reporting Failure to platform (submission_id={submission_id}) "
-                f"with log_data_key={'present' if log_data_key else 'None'} "
-                f"and output_data_key={'present' if output_data_key else 'None'}"
-            )
-            platform_client.report_submission_status(
-                submission_id=submission_id,
-                status="Failure",
-                reason="Execution pipeline failed before container could produce output. Check validator logs around the submission timestamp for details (download/build/start phase).",
-                log_data_key=log_data_key,
-                output_data_key=output_data_key,
-                failure_reason=ValidationFailureReason.UNKNOWN.value,
-            )
         return None, None, None
 
     bt.logging.info(

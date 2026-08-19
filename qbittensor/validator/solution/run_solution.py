@@ -26,7 +26,7 @@ import zipfile
 import bittensor as bt
 
 from qbittensor.validator.solution.exceptions.invalid_solution import InvalidSolutionError
-from qbittensor.utils.solution_status import ValidationFailureReason
+from qbittensor.utils.solution_status import OutputExtractionStatus, ValidationFailureReason
 
 from .docker_ops import DockerOps
 from .solution_context import SolutionExecution
@@ -125,7 +125,7 @@ def prepare_challenge_input_mount_dir(workspace: str) -> str:
     return mount_dir
 
 
-def extract_stdout_output(container_ref: str, host_workspace: str) -> bool:
+def extract_stdout_output(container_ref: str, host_workspace: str) -> OutputExtractionStatus:
     """
     Pull a stopped miner container's output via ``docker logs`` and split it into
     the run's log file and the run's solution-output zip.
@@ -143,10 +143,8 @@ def extract_stdout_output(container_ref: str, host_workspace: str) -> bool:
     - Full raw docker logs (stdout + stderr) → ``<host_workspace>/output/container.log`` (SOLUTION_LOG_FILENAME)
     - Base64 payload → ``solution_artifacts.zip`` then extracted
 
-    Returns ``True`` when at least the log file was produced; the function still
-    returns ``True`` if the separator was missing (whole stdout → logs, no
-    artifacts). Returns ``False`` when ``docker logs`` fails, the payload is not
-    valid base64, or the decoded bytes are not a valid zip.
+    Returns an :class:`OutputExtractionStatus` describing whether artifacts were
+    extracted or why they were not.
     """
     host_output = os.path.join(os.path.abspath(host_workspace), CONTAINER_OUTPUT_DIRNAME)
     os.makedirs(host_output, exist_ok=True)
@@ -169,11 +167,11 @@ def extract_stdout_output(container_ref: str, host_workspace: str) -> bool:
             f"❌ Failed to read stdout from '{container_ref}': {stderr}"
         )
         _write_extraction_diagnostics(artifacts_dir, container_ref, f"docker logs failed: {stderr}")
-        return False
+        return OutputExtractionStatus.DOCKER_LOGS_FAILED
     except Exception as e:
         bt.logging.error(f"❌ Failed to invoke docker logs for '{container_ref}': {e}")
         _write_extraction_diagnostics(artifacts_dir, container_ref, f"Failed to invoke docker logs: {e}")
-        return False
+        return OutputExtractionStatus.DOCKER_LOGS_FAILED
 
     if full_logs_str:
         log_path = os.path.join(host_output, SOLUTION_LOG_FILENAME)
@@ -193,7 +191,7 @@ def extract_stdout_output(container_ref: str, host_workspace: str) -> bool:
             artifacts_dir, container_ref,
             f"stdout exceeded cap ({len(raw_stdout)} > {max_bytes} bytes)."
         )
-        return False
+        return OutputExtractionStatus.STDOUT_TOO_LARGE
 
     _, payload_b64, separator_found = _split_on_separator(raw_stdout)
 
@@ -210,7 +208,7 @@ def extract_stdout_output(container_ref: str, host_workspace: str) -> bool:
             f"then base64-encoded zip of {RESULT_JSON_FILENAME} (and other files).\n"
             "See the mock_solution.py example for the required contract."
         )
-        return True
+        return OutputExtractionStatus.NO_SEPARATOR
 
     payload_b64 = payload_b64.strip()
 
@@ -225,7 +223,7 @@ def extract_stdout_output(container_ref: str, host_workspace: str) -> bool:
             f"❌ Solution payload from '{container_ref}' is not valid base64: {e}"
         )
         _write_extraction_diagnostics(artifacts_dir, container_ref, f"Base64 decode of solution payload failed: {e}")
-        return False
+        return OutputExtractionStatus.INVALID_BASE64
 
     zip_path = os.path.join(host_output, SOLUTION_OUTPUT_ZIP_FILENAME)
     try:
@@ -236,7 +234,7 @@ def extract_stdout_output(container_ref: str, host_workspace: str) -> bool:
             f"❌ Failed to write solution zip for '{container_ref}' to '{zip_path}': {e}"
         )
         _write_extraction_diagnostics(artifacts_dir, container_ref, f"Failed to write decoded solution zip: {e}")
-        return False
+        return OutputExtractionStatus.EXTRACT_FAILED
 
     if os.path.isdir(artifacts_dir):
         shutil.rmtree(artifacts_dir)
@@ -252,7 +250,7 @@ def extract_stdout_output(container_ref: str, host_workspace: str) -> bool:
             "Separator was present but the base64 payload after it was empty. "
             "The solution wrote the separator line but no (or zero-length) zip data after it."
         )
-        return True
+        return OutputExtractionStatus.EMPTY_PAYLOAD
 
     if not zipfile.is_zipfile(zip_path):
         bt.logging.error(
@@ -264,7 +262,7 @@ def extract_stdout_output(container_ref: str, host_workspace: str) -> bool:
             f"Decoded payload after separator is not a valid zip file (path: {zip_path}). "
             "Common causes: logging after the separator, wrong base64, or the solution wrote raw binary instead of base64."
         )
-        return False
+        return OutputExtractionStatus.INVALID_ZIP
 
     max_uncompressed = _solution_output_max_uncompressed_bytes()
     try:
@@ -282,7 +280,7 @@ def extract_stdout_output(container_ref: str, host_workspace: str) -> bool:
                 artifacts_dir, container_ref,
                 f"Declared uncompressed size {declared} exceeds limit {max_uncompressed}."
             )
-            return False
+            return OutputExtractionStatus.EXTRACT_FAILED
     except Exception as e:
         bt.logging.warning(f"Could not pre-estimate zip size, will rely on streaming limit: {e}")
 
@@ -294,18 +292,18 @@ def extract_stdout_output(container_ref: str, host_workspace: str) -> bool:
             f"❌ Failed to read solution zip for '{container_ref}' at '{zip_path}': {e}"
         )
         _write_extraction_diagnostics(artifacts_dir, container_ref, f"BadZipFile when extracting: {e}")
-        return False
+        return OutputExtractionStatus.INVALID_ZIP
     except (OSError, RuntimeError) as e:
         bt.logging.error(
             f"❌ Failed to extract solution zip for '{container_ref}' to '{artifacts_dir}': {e}"
         )
         _write_extraction_diagnostics(artifacts_dir, container_ref, f"Failed to extract solution zip: {e}")
-        return False
+        return OutputExtractionStatus.EXTRACT_FAILED
 
     bt.logging.info(
         f"✅ Extracted solution output from '{container_ref}' to '{artifacts_dir}'"
     )
-    return True
+    return OutputExtractionStatus.ARTIFACTS_EXTRACTED
 
 
 def resolve_verif_json(artifacts_dir: str) -> str | None:

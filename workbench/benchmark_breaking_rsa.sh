@@ -29,7 +29,7 @@
 # Prerequisites:
 #   - Docker installed and running
 #   - Python 3.12+ with click, gmpy2, cryptography installed
-#   - Run from the repo root (enigma-staging/)
+#   - Run from the repo root
 #
 # Environment variables (optional):
 #   PYTHON        Path to Python 3.12+ binary (default: auto-detect)

@@ -16,7 +16,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 from datetime import timedelta
-from typing import Optional
+from typing import Any, Optional
 import requests
 
 import bittensor as bt
@@ -57,7 +57,7 @@ class ChallengesClient:
         self,
         base_url: Optional[str] = None,
         *,
-        keypair: Optional[bt.Keypair] = None,
+        keypair: Optional[Any] = None,
         tensorauth_url: Optional[str] = None,
         netuid: Optional[int] = None,
     ):

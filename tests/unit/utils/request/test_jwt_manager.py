@@ -83,3 +83,27 @@ class TestJWTManager:
         token = KeycloakJWT(access_token="abc", expires_in=60)
         assert token.access_token == "abc"
         assert token.expires_in == 60
+        assert token.sink_hotkey is None
+        assert token.tempo_id is None
+
+    def test_get_jwt_parses_optional_sink_fields(self):
+        keypair = Mock()
+        keypair.ss58_address = "5HotkeyAddress"
+        keypair.sign.return_value = b"signed-bytes"
+
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "access_token": "tok123",
+            "expires_in": 3600,
+            "sink_hotkey": "5DCLafsAKaLeZwm9hjMHvrQNjtucSwBhKyTLYnYmMvhxF2Uc",
+            "tempo_id": 99,
+        }
+        mock_response.raise_for_status = Mock()
+
+        manager = JWTManager(keypair, netuid=63, tensorauth_url="http://dummy-auth")
+        manager._session = Mock()
+        manager._session.get.return_value = mock_response
+
+        jwt = manager.get_jwt()
+        assert jwt.sink_hotkey == "5DCLafsAKaLeZwm9hjMHvrQNjtucSwBhKyTLYnYmMvhxF2Uc"
+        assert jwt.tempo_id == 99

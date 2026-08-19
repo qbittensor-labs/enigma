@@ -86,19 +86,22 @@ class VaultChecker:
 
     def get_substrate_balance(self, ss58_address: str) -> float:
         try:
-            balance = self.subtensor.get_balance(ss58_address)
+            balance = self.subtensor.balances.get(ss58_address)
+            if hasattr(balance, "tao"):
+                return float(balance.tao)
+            if hasattr(balance, "amount"):
+                return float(balance.amount)
             return float(balance)
         except Exception as e:
             print(f"⚠️ Could not fetch Substrate balance: {e}")
             return 0.0
 
     def scan_all_stakes(self, coldkey_ss58: str):
-        """Fetches all stake info for a coldkey across all hotkeys/netuids."""
+        """Fetches all stake positions for a coldkey across hotkeys/netuids."""
         try:
             print(f"\nScanning network for all stakes on coldkey: {coldkey_ss58}...")
 
-            # The SDK handles the complex dTAO routing automatically
-            stake_info_list = self.subtensor.get_stake_info_for_coldkey(coldkey_ss58)
+            stake_info_list = self.subtensor.staking.positions(coldkey_ss58=coldkey_ss58)
 
             if not stake_info_list:
                 print("  -> No stake found on any hotkey for this coldkey.")
@@ -106,11 +109,19 @@ class VaultChecker:
 
             print("\nFound Stake:")
             for info in stake_info_list:
-                # Safely extract values depending on the SDK version's object structure
-                stake_val = float(info.stake) if hasattr(info, 'stake') else 0.0
+                stake = getattr(info, "stake", 0.0)
+                if hasattr(stake, "amount"):
+                    stake_val = float(stake.amount)
+                elif hasattr(stake, "tao"):
+                    stake_val = float(stake.tao)
+                else:
+                    try:
+                        stake_val = float(stake)
+                    except Exception:
+                        stake_val = 0.0
                 if stake_val > 0:
-                    hotkey = getattr(info, 'hotkey_ss58', 'Unknown Hotkey')
-                    netuid = getattr(info, 'netuid', 'Root/Legacy')
+                    hotkey = getattr(info, "hotkey", "Unknown Hotkey")
+                    netuid = getattr(info, "netuid", "?")
                     print(f"  -> Hotkey : {hotkey}")
                     print(f"     Netuid : {netuid}")
                     print(f"     Amount : {stake_val:,.4f} α/τ\n")

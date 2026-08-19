@@ -60,7 +60,8 @@ def test_gpu_container(
     """
 
     build_dir = str(_GPU_VERIFICATION_DIR)
-    gpus_arg = (gpus or _gpu_passthrough()).strip()
+    # Use explicit None check: gpus="" must mean "disabled", not fall back to default.
+    gpus_arg = (_gpu_passthrough() if gpus is None else gpus).strip()
     if not gpus_arg:
         bt.logging.error(
             "GPU container test requires --gpus; set VALIDATOR_DOCKER_GPUS or pass gpus=..."

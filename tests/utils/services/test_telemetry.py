@@ -135,3 +135,357 @@ class TestCpuGpuLookupHelpers:
         # On this machine (no NVIDIA) we expect "none" or a value; either is acceptable.
         assert len(driver) > 0
         assert len(cuda) > 0
+
+    def test_get_docker_versions_parses_format_output(self):
+        from qbittensor.utils.services import telemetry as tel
+
+        class Result:
+            returncode = 0
+            stdout = "28.3.3|28.3.2\n"
+            stderr = ""
+
+        with patch.object(tel.subprocess, "run", return_value=Result()) as run:
+            client, server = tel._get_docker_versions()
+        assert client == "28.3.3"
+        assert server == "28.3.2"
+        format_arg = run.call_args.args[0][3]
+        assert "\t" not in format_arg
+        assert format_arg == tel._DOCKER_VERSION_FORMAT
+
+    def test_get_docker_versions_parses_tab_separated_output(self):
+        from qbittensor.utils.services import telemetry as tel
+
+        class Result:
+            returncode = 0
+            stdout = "28.3.3\t28.3.2\n"
+            stderr = ""
+
+        with patch.object(tel.subprocess, "run", return_value=Result()):
+            client, server = tel._get_docker_versions()
+        assert client == "28.3.3"
+        assert server == "28.3.2"
+
+    def test_get_docker_versions_parses_table_padded_output(self):
+        from qbittensor.utils.services import telemetry as tel
+
+        class Result:
+            returncode = 0
+            stdout = "29.2.1              29.2.1\n"
+            stderr = ""
+
+        with patch.object(tel.subprocess, "run", return_value=Result()):
+            client, server = tel._get_docker_versions()
+        assert client == "29.2.1"
+        assert server == "29.2.1"
+
+    def test_get_docker_versions_ignores_missing_server(self):
+        from qbittensor.utils.services import telemetry as tel
+
+        class Result:
+            returncode = 1
+            stdout = "28.3.3|<no value>\n"
+            stderr = "Cannot connect to the Docker daemon"
+
+        with patch.object(tel.subprocess, "run", return_value=Result()):
+            client, server = tel._get_docker_versions()
+        assert client == "28.3.3"
+        assert server == ""
+
+    def test_get_docker_versions_falls_back_to_docker_dash_dash_version(self):
+        from qbittensor.utils.services import telemetry as tel
+
+        class EmptyFormat:
+            returncode = 1
+            stdout = ""
+            stderr = "unknown flag"
+
+        class Plain:
+            returncode = 0
+            stdout = "Docker version 27.5.1, build abc123\n"
+            stderr = ""
+
+        with patch.object(tel.subprocess, "run", side_effect=[EmptyFormat(), Plain()]):
+            client, server = tel._get_docker_versions()
+        assert client == "27.5.1"
+        assert server == ""
+
+    def test_get_docker_versions_raises_when_cli_missing(self):
+        from qbittensor.utils.services import telemetry as tel
+
+        with patch.object(tel.subprocess, "run", side_effect=FileNotFoundError("docker")):
+            with pytest.raises(RuntimeError, match="docker CLI not found"):
+                tel._get_docker_versions()
+
+
+class TestGpuMetricHelpers:
+    def test_decode_throttle_reasons_ignores_idle(self):
+        from qbittensor.utils.services.telemetry import _decode_throttle_reasons
+
+        assert _decode_throttle_reasons(0) == "none"
+        assert _decode_throttle_reasons(0x1) == "none"  # gpu idle
+        assert _decode_throttle_reasons(0x2) == "none"  # applications clocks
+        assert _decode_throttle_reasons(0x4) == "sw_power_cap"
+        assert _decode_throttle_reasons(0x4 | 0x20) == "sw_power_cap,sw_thermal_slowdown"
+        assert _decode_throttle_reasons(0x1 | 0x8) == "hw_slowdown"
+
+    def test_selected_gpu_indices(self):
+        from qbittensor.utils.services.telemetry import _selected_gpu_indices
+
+        assert _selected_gpu_indices("cpu", 2) == []
+        assert _selected_gpu_indices("cuda:1", 2) == [1]
+        assert _selected_gpu_indices("cuda:99", 2) == []
+        assert _selected_gpu_indices("cuda", 2) == [0, 1]
+        assert _selected_gpu_indices("cuda:0", 0) == []
+
+    def test_get_gpu_static_info_cpu_path(self):
+        from qbittensor.utils.services.telemetry import _get_gpu_static_info
+
+        assert _get_gpu_static_info("cpu") == []
+
+    def test_get_gpu_static_info_survives_per_field_failure(self):
+        from qbittensor.utils.services import telemetry as tel
+
+        handle = object()
+        mem = Mock(total=96 * 1024 * 1024 * 1024)
+
+        with patch.object(tel, "NVML_AVAILABLE", True), \
+             patch.object(tel, "nvmlInit"), \
+             patch.object(tel, "nvmlShutdown"), \
+             patch.object(tel, "nvmlDeviceGetCount", return_value=1), \
+             patch.object(tel, "nvmlDeviceGetHandleByIndex", return_value=handle), \
+             patch.object(tel, "nvmlDeviceGetMemoryInfo", return_value=mem), \
+             patch.object(tel, "nvmlDeviceGetCudaComputeCapability", side_effect=RuntimeError("no cc")), \
+             patch.object(tel, "nvmlDeviceGetPowerManagementLimit", return_value=600_000), \
+             patch.object(tel, "nvmlDeviceGetPowerManagementDefaultLimit", side_effect=RuntimeError("no default")), \
+             patch.object(tel, "nvmlDeviceGetPowerManagementLimitConstraints", return_value=[300_000, 600_000]):
+            infos = tel._get_gpu_static_info("cuda")
+
+        assert len(infos) == 1
+        assert infos[0].memory_total_bytes == 96 * 1024 * 1024 * 1024
+        assert infos[0].compute_capability is None
+        assert infos[0].power_limit_watts == 600.0
+        assert infos[0].power_default_limit_watts is None
+        assert infos[0].power_max_limit_watts == 600.0
+
+    def test_get_gpu_static_info_raises_on_init_failure(self):
+        from qbittensor.utils.services import telemetry as tel
+
+        with patch.object(tel, "NVML_AVAILABLE", True), \
+             patch.object(tel, "nvmlInit", side_effect=RuntimeError("libnvidia-ml.so")):
+            with pytest.raises(RuntimeError, match="pynvml init failed"):
+                tel._get_gpu_static_info("cuda")
+
+    def test_get_gpu_runtime_info_empty_without_indices(self):
+        from qbittensor.utils.services.telemetry import _get_gpu_runtime_info
+
+        assert _get_gpu_runtime_info([]) == []
+
+    def test_get_gpu_runtime_info_raises_when_all_handles_fail(self):
+        from qbittensor.utils.services import telemetry as tel
+
+        with patch.object(tel, "NVML_AVAILABLE", True), \
+             patch.object(tel, "nvmlDeviceGetHandleByIndex", side_effect=RuntimeError("no handle")):
+            with pytest.raises(RuntimeError, match="no runtime metrics"):
+                tel._get_gpu_runtime_info([0])
+
+    def test_get_gpu_runtime_info_reads_power_temp_throttle(self):
+        from qbittensor.utils.services import telemetry as tel
+
+        handle = object()
+        mem = Mock(total=100, used=25)
+        with patch.object(tel, "NVML_AVAILABLE", True), \
+             patch.object(tel, "nvmlDeviceGetHandleByIndex", return_value=handle), \
+             patch.object(tel, "nvmlDeviceGetUtilizationRates", return_value=Mock(gpu=80)), \
+             patch.object(tel, "nvmlDeviceGetMemoryInfo", return_value=mem), \
+             patch.object(tel, "nvmlDeviceGetPowerUsage", return_value=412_500), \
+             patch.object(tel, "nvmlDeviceGetPowerManagementLimit", return_value=600_000), \
+             patch.object(tel, "nvmlDeviceGetTemperature", return_value=62), \
+             patch.object(tel, "nvmlDeviceGetCurrentClocksEventReasons", return_value=0x4):
+            infos = tel._get_gpu_runtime_info([0])
+
+        assert len(infos) == 1
+        assert infos[0].utilization == 80.0
+        assert infos[0].memory_usage_percent == 25.0
+        assert infos[0].power_draw_watts == 412.5
+        assert infos[0].power_limit_watts == 600.0
+        assert infos[0].temperature_c == 62.0
+        assert infos[0].throttle_reasons == "sw_power_cap"
+
+    def test_discover_gpu_indices_cpu(self):
+        from qbittensor.utils.services.telemetry import _discover_gpu_indices
+
+        assert _discover_gpu_indices("cpu") == []
+
+
+class TestGpuTelemetryRecording:
+    def test_startup_enqueues_per_gpu_capability(self, telemetry_service):
+        from qbittensor.utils.services import telemetry as tel
+
+        info = tel.GpuStaticInfo(
+            index=0,
+            memory_total_bytes=96 * 1024 * 1024 * 1024,
+            compute_capability="10.0",
+            power_limit_watts=600.0,
+            power_default_limit_watts=600.0,
+            power_max_limit_watts=600.0,
+        )
+        vm = Mock(total=96 * 1024 * 1024 * 1024)
+        disk = Mock(total=2 * 1024 * 1024 * 1024 * 1024)
+        with patch.object(tel, "_get_cpu_model", return_value="Test CPU"), \
+             patch.object(tel.psutil, "cpu_count", return_value=26), \
+             patch.object(tel.psutil, "virtual_memory", return_value=vm), \
+             patch.object(tel.psutil, "disk_usage", return_value=disk), \
+             patch.object(tel, "_get_gpu_info", return_value=(1, "NVIDIA RTX PRO 6000")), \
+             patch.object(tel, "_get_nvidia_driver_info", return_value=("570.00", "12.8")), \
+             patch.object(tel, "_get_docker_versions", return_value=("28.3.3", "28.3.3")), \
+             patch.object(tel, "_get_gpu_static_info", return_value=[info]), \
+             patch.object(tel, "_discover_gpu_indices", return_value=[0]), \
+             patch.object(tel, "NVML_AVAILABLE", False):
+            telemetry_service.device = "cuda"
+            telemetry_service.record_startup_metrics()
+
+        items = []
+        while not telemetry_service.queue.empty():
+            items.append(telemetry_service.queue.get_nowait())
+        by_type = {item["type"]: item for item in items}
+
+        assert by_type["system_gpu_memory_bytes"]["value"] == float(96 * 1024 * 1024 * 1024)
+        assert by_type["system_gpu_memory_bytes"]["attributes"]["gpu_index"] == 0
+        assert by_type["system_gpu_compute_capability"]["value"] == "10.0"
+        assert by_type["system_gpu_power_limit_watts"]["value"] == 600.0
+        assert by_type["system_gpu_power_default_limit_watts"]["value"] == 600.0
+        assert by_type["system_gpu_power_max_limit_watts"]["value"] == 600.0
+        assert by_type["system_docker_version"]["value"] == "28.3.3"
+        assert by_type["system_docker_server_version"]["value"] == "28.3.3"
+        assert by_type["system_gpu_driver_version"]["value"] == "570.00"
+        assert by_type["system_cuda_version"]["value"] == "12.8"
+        assert telemetry_service.gpu_indices == [0]
+
+    def test_startup_skips_missing_static_fields(self, telemetry_service):
+        from qbittensor.utils.services import telemetry as tel
+
+        info = tel.GpuStaticInfo(index=0, memory_total_bytes=1024, compute_capability=None)
+        vm = Mock(total=1)
+        disk = Mock(total=1)
+        with patch.object(tel, "_get_cpu_model", return_value="cpu"), \
+             patch.object(tel.psutil, "cpu_count", return_value=1), \
+             patch.object(tel.psutil, "virtual_memory", return_value=vm), \
+             patch.object(tel.psutil, "disk_usage", return_value=disk), \
+             patch.object(tel, "_get_gpu_info", return_value=(1, "gpu")), \
+             patch.object(tel, "_get_nvidia_driver_info", return_value=("1.0", "12.0")), \
+             patch.object(tel, "_get_docker_versions", return_value=("28.0.0", "")), \
+             patch.object(tel, "_get_gpu_static_info", return_value=[info]), \
+             patch.object(tel, "NVML_AVAILABLE", False):
+            telemetry_service.device = "cuda"
+            telemetry_service.record_startup_metrics()
+
+        types = {item["type"] for item in _drain(telemetry_service)}
+        assert "system_gpu_memory_bytes" in types
+        assert "system_gpu_compute_capability" not in types
+        assert "system_gpu_power_limit_watts" not in types
+
+    def test_system_metrics_enqueues_power_temp_throttle(self, telemetry_service):
+        from qbittensor.utils.services import telemetry as tel
+
+        info = tel.GpuRuntimeInfo(
+            index=0,
+            utilization=80.0,
+            memory_usage_percent=50.0,
+            power_draw_watts=412.5,
+            power_limit_watts=600.0,
+            temperature_c=62.0,
+            throttle_reasons="sw_power_cap",
+        )
+        vm = Mock(percent=10.0)
+        disk = Mock(percent=20.0)
+        telemetry_service.gpu_indices = [0]
+        telemetry_service._pynvml_initialized = True
+        with patch.object(tel.psutil, "cpu_percent", return_value=5.0), \
+             patch.object(tel.psutil, "virtual_memory", return_value=vm), \
+             patch.object(tel.psutil, "disk_usage", return_value=disk), \
+             patch.object(tel, "_get_docker_versions", return_value=("28.3.3", "28.3.3")), \
+             patch.object(tel, "_get_nvidia_driver_info", return_value=("570.00", "12.8")), \
+             patch.object(tel, "_get_gpu_runtime_info", return_value=[info]) as runtime:
+            telemetry_service.record_system_metrics()
+
+        runtime.assert_called_once_with([0])
+        by_type = {item["type"]: item for item in _drain(telemetry_service)}
+        assert by_type["system_gpu_utilization"]["value"] == 80.0
+        assert by_type["system_gpu_memory_usage"]["value"] == 50.0
+        assert by_type["system_gpu_power_draw_watts"]["value"] == 412.5
+        assert by_type["system_gpu_power_limit_watts"]["value"] == 600.0
+        assert by_type["system_gpu_temperature_c"]["value"] == 62.0
+        assert by_type["system_gpu_throttle_reasons"]["value"] == "sw_power_cap"
+        assert by_type["system_gpu_throttle_reasons"]["attributes"]["gpu_index"] == 0
+        assert by_type["system_docker_version"]["value"] == "28.3.3"
+        assert by_type["system_gpu_driver_version"]["value"] == "570.00"
+        assert by_type["system_cuda_version"]["value"] == "12.8"
+
+    def test_startup_collection_error_does_not_block_other_collectors(self, telemetry_service):
+        from qbittensor.utils.services import telemetry as tel
+
+        vm = Mock(total=1)
+        with patch.object(tel, "_get_cpu_model", return_value="Test CPU"), \
+             patch.object(tel.psutil, "cpu_count", return_value=8), \
+             patch.object(tel.psutil, "virtual_memory", return_value=vm), \
+             patch.object(tel.psutil, "disk_usage", side_effect=OSError("disk dead")), \
+             patch.object(tel, "_get_gpu_info", return_value=(1, "NVIDIA RTX PRO 6000")), \
+             patch.object(tel, "_get_nvidia_driver_info", return_value=("570.00", "12.8")), \
+             patch.object(tel, "_get_docker_versions", side_effect=RuntimeError("docker CLI not found")), \
+             patch.object(tel, "_get_gpu_static_info", return_value=[]), \
+             patch.object(tel, "_discover_gpu_indices", return_value=[]), \
+             patch.object(tel, "NVML_AVAILABLE", False):
+            telemetry_service.device = "cuda"
+            telemetry_service.record_startup_metrics()
+
+        items = _drain(telemetry_service)
+        by_type = {}
+        errors = []
+        for item in items:
+            if item["type"] == "system_collection_error":
+                errors.append(item)
+            else:
+                by_type[item["type"]] = item
+
+        assert by_type["system_cpu_family"]["value"] == "Test CPU"
+        assert by_type["system_gpu_models"]["value"] == "NVIDIA RTX PRO 6000"
+        assert by_type["system_gpu_driver_version"]["value"] == "570.00"
+        assert "system_disk_bytes" not in by_type
+        assert "system_docker_version" not in by_type
+        collectors = {item["value"] for item in errors}
+        assert "disk" in collectors
+        assert "docker_version" in collectors
+        docker_err = next(item for item in errors if item["value"] == "docker_version")
+        assert "docker CLI not found" in docker_err["attributes"]["error"]
+
+    def test_system_metrics_survives_gpu_runtime_failure(self, telemetry_service):
+        from qbittensor.utils.services import telemetry as tel
+
+        vm = Mock(percent=10.0)
+        disk = Mock(percent=20.0)
+        telemetry_service.device = "cuda"
+        telemetry_service.gpu_indices = [0]
+        telemetry_service._pynvml_initialized = True
+        with patch.object(tel.psutil, "cpu_percent", return_value=5.0), \
+             patch.object(tel.psutil, "virtual_memory", return_value=vm), \
+             patch.object(tel.psutil, "disk_usage", return_value=disk), \
+             patch.object(tel, "_get_docker_versions", return_value=("28.3.3", "")), \
+             patch.object(tel, "_get_nvidia_driver_info", return_value=("none", "none")), \
+             patch.object(tel, "_get_gpu_runtime_info", side_effect=RuntimeError("nvml exploded")):
+            telemetry_service.record_system_metrics()
+
+        items = _drain(telemetry_service)
+        by_type = {item["type"]: item for item in items if item["type"] != "system_collection_error"}
+        errors = [item for item in items if item["type"] == "system_collection_error"]
+        assert by_type["system_cpu_usage"]["value"] == 5.0
+        assert by_type["system_docker_version"]["value"] == "28.3.3"
+        collectors = {item["value"] for item in errors}
+        assert "gpu_runtime" in collectors
+        assert "nvidia_driver" in collectors
+
+
+def _drain(service):
+    items = []
+    while not service.queue.empty():
+        items.append(service.queue.get_nowait())
+    return items

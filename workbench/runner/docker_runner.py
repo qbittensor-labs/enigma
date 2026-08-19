@@ -31,6 +31,7 @@ from qbittensor.challenges.solution_output import extract_artifacts, split_on_se
 # These ensure the workbench applies the same limits and hardening that the
 # real validator will enforce on submitted solutions.
 from qbittensor.validator.solution.constants import (
+    CONTAINER_CHALLENGE_INPUT_PATH,
     MAX_SOLUTION_DOCKER_IMAGE_SIZE_BYTES,
     SOLUTION_STDOUT_MAX_BYTES_DEFAULT,
     SOLUTION_STDOUT_MAX_BYTES_ENV,
@@ -213,22 +214,21 @@ def build_image(solution_dir: str, challenge_type: str) -> RunResult:
 
 def run_container(
     challenge_type: str,
-    challenge_id: str,
-    problem_json: str,
+    challenge_input_dir: str,
     output_dir: str,
     timeout: int = DEFAULT_WALL_TIME,
-    qasm_file: str | None = None,
     env_vars: dict[str, str] | None = None,
     network: bool = False,
 ) -> RunResult:
     """Run a Docker container with the solver.
 
-    Matches the validator contract exactly: run detached, then after exit use
-    the `docker logs` command to obtain the output (combined stdout+stderr).
-    This guarantees the workbench sees the exact same stream (and potential
-    interleaving/corruption) that the validator sees at runtime.
+    Matches the validator contract exactly:
 
-    Extraction and the returned log are derived from the `docker logs` output.
+    - Challenge inputs are provided via a fresh host directory mounted
+      read-only at ``/challenge_input`` (no CLI args).
+    - Run detached, then after exit use ``docker logs`` to obtain the
+      combined stdout+stderr stream (same interleaving the validator sees).
+    - No writable output volume; solvers emit artifacts via the stdout protocol.
 
     Security hardening (read-only root, restricted tmpfs, dropped caps,
     no-new-privileges, pids limit, forced non-root user, etc.) is applied using
@@ -240,12 +240,15 @@ def run_container(
     85 GiB RAM, or NVIDIA GPU passthrough.
 
     Args:
+        challenge_input_dir: Host directory prepared with challenge input files
+            (e.g. challenge_input.json). Mounted read-only at /challenge_input.
         network: If True, allow network access. Default False (matches validator).
     """
     image_name = f"workbench-test-{challenge_type}"
+    challenge_mount = os.path.abspath(challenge_input_dir)
 
     cmd = [
-        "docker", "run", "--rm",
+        "docker", "run",
         "--platform", "linux/amd64",
     ]
 
@@ -258,11 +261,7 @@ def run_container(
     # machines unless the user explicitly sets the validator env vars.
     cmd.extend(_get_workbench_docker_args())
 
-    # No -v for output — we capture via `docker logs` after exit (exact runtime contract).
-
-    if qasm_file:
-        qasm_abs = os.path.abspath(qasm_file)
-        cmd.extend(["-v", f"{qasm_abs}:/app/peaked-circuit.qasm:ro"])
+    cmd.extend(["-v", f"{challenge_mount}:{CONTAINER_CHALLENGE_INPUT_PATH}:ro"])
 
     if env_vars:
         for key, value in env_vars.items():
@@ -271,10 +270,9 @@ def run_container(
     # Use a unique name so we can run detached and then fetch logs explicitly
     # (exactly like the validator does at runtime).
     container_name = f"workbench-{challenge_type}-{uuid.uuid4().hex[:12]}"
-    cmd = [c for c in cmd if c != "--rm"]  # remove --rm, we'll rm manually after logs
     cmd[cmd.index("run") + 1: cmd.index("run") + 1] = ["-d", "--name", container_name]
 
-    cmd.extend([image_name, challenge_id, problem_json])
+    cmd.append(image_name)
 
     start = time.time()
     container_id = None

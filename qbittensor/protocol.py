@@ -19,6 +19,7 @@
 Protocol for Challenges
 """
 from __future__ import annotations
+from qbittensor import bt_compat  # noqa: F401 — install Synapse shim
 import bittensor as bt
 from pydantic import Field, BaseModel
 from typing import Optional

@@ -16,7 +16,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 import bittensor as bt
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 import requests
 from datetime import datetime, timedelta
 
@@ -38,13 +38,13 @@ class RequestManager:
 
     def __init__(
         self,
-        keypair: bt.Keypair,
+        keypair: Any,
         base_url: str | None = None,
         network: str = "",
         netuid: int | None = None,
         tensorauth_url: str | None = None,
     ) -> None:
-        self._keypair: bt.Keypair = keypair
+        self._keypair: Any = keypair
         self._base_url = base_url.rstrip("/") if base_url else None
         self._network = network
         self._netuid: int | None = netuid
@@ -58,6 +58,15 @@ class RequestManager:
         self._session: requests.Session = make_session(
             allowed_methods=["GET", "POST", "PATCH"],
         )
+
+    @property
+    def jwt(self) -> JWT | None:
+        return self._jwt
+
+    def refresh_jwt(self) -> JWT:
+        """Force a new tensorauth token (used when the cached JWT spans a tempo)."""
+        self._jwt = self._jwt_manager.get_jwt()
+        return self._jwt
 
     def get(
         self,
