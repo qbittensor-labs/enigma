@@ -146,10 +146,13 @@ A generic `Failure` may still appear in some terminal/lost-container cases.
 | `Failure`                     | Generic failure (used in some recovery/terminal cases) |
 | `UploadFailure`               | Failed to establish upload locations for validator logs or solution output during validation |
 | `BuildFailure`                | Docker build failed (bad Dockerfile, missing dependencies, compilation error, etc.) |
-| `RunFailure`                  | The container started but then failed or crashed during execution |
+| `RunFailure`                  | The container failed to start, or crashed during execution without producing solution artifacts |
 | `ImageValidationFailure`      | The built image failed post-build checks (e.g. too large, missing required labels) |
 | `InvalidProgram`              | The code inside your submission was invalid (syntax errors, missing files, etc.) |
 | `InvalidZip`                  | The uploaded archive was corrupted or not a valid zip |
+| `InvalidOutputBase64`         | The container wrote the output separator, but the payload after it was not valid base64 |
+| `InvalidOutputZip`            | The container payload decoded but was not a valid zip of solution artifacts |
+| `EmptyArtifacts`              | The container exited 0 but produced no solution artifacts (missing separator or empty payload) |
 | `ZipDownloadFailure`          | The validator could not download your submission from storage |
 | `MissingDockerfile`           | No `Dockerfile` was present in the root of the zip |
 | `WallTimeFailure`             | Your solution exceeded the maximum allowed runtime for this milestone |
@@ -183,6 +186,7 @@ Because the TreasuryController contract does not (yet) expose a public view func
 DEFAULT_TRUSTED_HOTKEYS: list[str] = [
     "5GzjAcUcD3pFk5ybJ1qP4tMfnyk2Kh3SX8R2kMQwPU2dTs63",
     "5EZ52JMq4S7PYqzmLAggYahyDirMx3p1f1uBtLQgx6fk7kR8",
+    "5D7etdUeLm4JsSZGkBrHoiyjezPHAJUiafEd5XU4wNnWSL63",
 ]
 ```
 

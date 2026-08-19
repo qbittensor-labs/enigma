@@ -33,6 +33,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from qbittensor.utils.solution_status import OutputExtractionStatus
+
 
 @dataclass(frozen=True)
 class SolutionPostProcessInfo:
@@ -50,6 +52,8 @@ class SolutionPostProcessInfo:
     container_name: str
     workspace_path: str
     image_id: str
+    exit_code: int = -1
+    extraction: OutputExtractionStatus | None = None
 
     # Convenience delegates for the identity fields (keeps call sites simple)
     @property

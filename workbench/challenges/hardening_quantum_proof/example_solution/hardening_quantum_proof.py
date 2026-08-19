@@ -32,10 +32,12 @@ Output contract (stdout-only, no shared filesystem with the validator):
   3. After the separator, a base64-encoded zip of result.json and
      solve_info.json is written to stdout.
 
-Usage (workbench): python hardening_quantum_proof.py <challenge_id> <JSON-encoded Problem>
+Usage (direct / local CLI):
+  python hardening_quantum_proof.py <challenge_id> <JSON-encoded Problem>
 
-Validator Docker mode: no CLI args; read /challenge_input/challenge_input.json
-from the read-only mount (see enigma_challenges.hardening_quantum_proof.load_solver_input).
+Validator / workbench Docker mode: no CLI args; read
+/challenge_input/challenge_input.json from the read-only mount
+(see enigma_challenges.hardening_quantum_proof.load_solver_input).
 """
 
 from datetime import datetime, timezone

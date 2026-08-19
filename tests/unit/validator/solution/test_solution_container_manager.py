@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
+from qbittensor.utils.solution_status import OutputExtractionStatus
 from qbittensor.validator.solution.solution_container_manager import (
     SolutionContainerManager,
     SolutionExecution,
@@ -177,13 +178,16 @@ class TestExtractOutputsFromCompletedContainers:
             download_url="", solution_id="sol-id-123",
         )
         infos = [SolutionPostProcessInfo(exec, "ctr_one", "/tmp/sol_workspace", "img1")]
-        with patch.object(container_manager, "_container_has_validator_label", return_value=True):
+        with patch.object(container_manager, "_container_has_validator_label", return_value=True), \
+                patch.object(container_manager, "_get_container_exit_details", return_value={"exit_code": 0}):
             with patch(
                 "qbittensor.validator.solution.solution_container_manager.extract_stdout_output",
-                return_value=True,
+                return_value=OutputExtractionStatus.ARTIFACTS_EXTRACTED,
             ) as mock_extract:
-                container_manager._extract_outputs_from_completed_containers(infos)
+                updated = container_manager._extract_outputs_from_completed_containers(infos)
         mock_extract.assert_called_once_with("ctr_one", "/tmp/sol_workspace")
+        assert updated[0].extraction is OutputExtractionStatus.ARTIFACTS_EXTRACTED
+        assert updated[0].exit_code == 0
 
     def test_skips_without_validator_label(self, container_manager):
         exec = SolutionExecution.create(
@@ -192,12 +196,15 @@ class TestExtractOutputsFromCompletedContainers:
             download_url="", solution_id="sol-id-123",
         )
         infos = [SolutionPostProcessInfo(exec, "ctr_one", "/tmp/sol_workspace", "img1")]
-        with patch.object(container_manager, "_container_has_validator_label", return_value=False):
+        with patch.object(container_manager, "_container_has_validator_label", return_value=False), \
+                patch.object(container_manager, "_get_container_exit_details", return_value={"exit_code": 1}):
             with patch(
                 "qbittensor.validator.solution.solution_container_manager.extract_stdout_output",
             ) as mock_extract:
-                container_manager._extract_outputs_from_completed_containers(infos)
+                updated = container_manager._extract_outputs_from_completed_containers(infos)
         mock_extract.assert_not_called()
+        assert updated[0].extraction is OutputExtractionStatus.SKIPPED
+        assert updated[0].exit_code == 1
 
 
 class TestFindCompletedSolutions:
@@ -213,12 +220,45 @@ class TestFindCompletedSolutions:
 
 
 class TestIsDockerAvailable:
-    def test_returns_true_when_docker_version_succeeds(self):
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="Docker version 24.0.0\n", returncode=0)
+    def test_returns_true_when_docker_version_and_buildx_succeed(self):
+        def side_effect(cmd, **kwargs):
+            if cmd[:2] == ["docker", "--version"]:
+                return MagicMock(stdout="Docker version 24.0.0\n", stderr="", returncode=0)
+            if cmd[:3] == ["docker", "buildx", "version"]:
+                return MagicMock(stdout="github.com/docker/buildx v0.12.0\n", stderr="", returncode=0)
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        with patch("subprocess.run", side_effect=side_effect) as mock_run:
             assert is_docker_available() is True
-        mock_run.assert_called_once()
-        assert "docker" in mock_run.call_args.args[0]
+        assert mock_run.call_count == 2
+
+    def test_returns_true_when_buildx_missing_but_progress_flag_supported(self):
+        def side_effect(cmd, **kwargs):
+            if cmd[:2] == ["docker", "--version"]:
+                return MagicMock(stdout="Docker version 24.0.0\n", stderr="", returncode=0)
+            if cmd[:3] == ["docker", "buildx", "version"]:
+                return MagicMock(stdout="", stderr="docker: unknown command: docker buildx", returncode=1)
+            if cmd[:3] == ["docker", "build", "--help"]:
+                return MagicMock(stdout="Usage: docker build\n      --progress string\n", stderr="", returncode=0)
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        with patch("subprocess.run", side_effect=side_effect):
+            assert is_docker_available() is True
+
+    def test_returns_false_when_legacy_builder_only(self, caplog):
+        def side_effect(cmd, **kwargs):
+            if cmd[:2] == ["docker", "--version"]:
+                return MagicMock(stdout="Docker version 20.10.0\n", stderr="", returncode=0)
+            if cmd[:3] == ["docker", "buildx", "version"]:
+                return MagicMock(stdout="", stderr="unknown command", returncode=1)
+            if cmd[:3] == ["docker", "build", "--help"]:
+                return MagicMock(stdout="Usage: docker build [OPTIONS] PATH\n", stderr="", returncode=0)
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        with patch("subprocess.run", side_effect=side_effect):
+            assert is_docker_available() is False
+        assert "BuildKit/buildx is required" in caplog.text
+        assert "docker-buildx-plugin" in caplog.text
 
     def test_returns_false_on_nonzero_exit_and_logs_diagnostics(self, caplog):
         with patch("subprocess.run") as mock_run, patch("shutil.which", return_value="/usr/bin/docker"):
@@ -292,7 +332,7 @@ class TestHandleCompletedSolutions:
         ]
 
         with patch.object(container_manager, "_find_completed_solutions", return_value=containers), \
-                patch.object(container_manager, "_extract_outputs_from_completed_containers") as mock_extract, \
+                patch.object(container_manager, "_extract_outputs_from_completed_containers", return_value=infos) as mock_extract, \
                 patch.object(container_manager, "_collect_completed_solution_infos", return_value=infos), \
                 patch.object(container_manager, "_validate_and_report_solutions") as mock_validate:
 
@@ -509,6 +549,31 @@ class TestStartupRecovery:
         mock_state.assert_not_called()
         container_manager.database_connection.db_query.mark_solution_cleaned.assert_not_called()
 
+    def test_pending_placeholder_reports_internal_failure_to_platform(self, container_manager):
+        pending_sol = self._make_sol(
+            sol_id="pending-1",
+            container_name="pending:container_name:0xabc",
+            path="pending:path:0xabc",
+            status=SolutionStatus.PENDING.value,
+            image_id="pending:image_id:0xabc",
+        )
+        pending_sol.submission_id = "sub-pending"
+        pending_sol.miner_hotkey = "5Miner"
+        container_manager.database_connection.db_query.get_uncleaned_solutions.side_effect = [
+            [pending_sol],
+            [pending_sol],
+        ]
+        with patch.object(container_manager, "handle_completed_solutions"), \
+             patch.object(container_manager, "_finalize_solution_terminal") as mock_final, \
+             patch("qbittensor.validator.solution.solution_container_manager.os.path.exists", return_value=False):
+            container_manager.recover_and_clean_on_startup()
+
+        mock_final.assert_called_once()
+        kwargs = mock_final.call_args.kwargs
+        assert kwargs["status"] == SolutionStatus.FAILURE.value
+        assert kwargs["failure_reason"] == ValidationFailureReason.INTERNAL_FAILURE.value
+        container_manager.database_connection.db_query.mark_solution_cleaned.assert_not_called()
+
     def test_path_gone_but_no_container_still_marks_cleaned(self, container_manager):
         orphan_sol = self._make_sol(sol_id="orphan-p", container_name=None, path="/gone/path", status=SolutionStatus.PENDING.value, image_id=None)
         container_manager.database_connection.db_query.get_uncleaned_solutions.side_effect = [[orphan_sol], [orphan_sol]]
@@ -598,12 +663,18 @@ class TestFinalizeSolutionTerminal:
         container_manager.platform_client = Mock()
         container_manager.telemetry_service = Mock()
 
-        container_manager._finalize_solution_terminal(
-            sol,
-            status=SolutionStatus.FAILURE.value,
-            reason="test reason overdue",
-            attempt_extraction=True,
-        )
+        with patch.object(
+            container_manager,
+            "_upload_terminal_artifacts",
+            return_value=(None, None),
+        ) as mock_upload:
+            container_manager._finalize_solution_terminal(
+                sol,
+                status=SolutionStatus.FAILURE.value,
+                reason="test reason overdue",
+                attempt_extraction=True,
+            )
+            mock_upload.assert_called_once_with("/ws/fin")
 
         container_manager.database_connection.db_query.update_solution_status_by_id.assert_called_once_with(
             "sol-finalize", SolutionStatus.FAILURE.value
@@ -614,9 +685,49 @@ class TestFinalizeSolutionTerminal:
         assert call_kwargs["submission_id"] == "sub-finalize"
         assert call_kwargs["status"] == "Failure"
         assert "test reason overdue" in call_kwargs["reason"]
+        assert call_kwargs.get("log_data_key") is None
+        assert call_kwargs.get("output_data_key") is None
 
         container_manager.telemetry_service.record_event.assert_called_once()
         # extraction should have been attempted (we don't assert the exact call here as it's patched in other tests)
+
+    def test_finalize_includes_uploaded_log_and_output_keys(self, container_manager):
+        """Wall-time / terminal failures must attach log/output keys when upload succeeds."""
+        sol = SimpleNamespace(
+            id="sol-keys",
+            submission_id="sub-keys",
+            miner_hotkey="hk-keys",
+            container_name="ctr-keys",
+            absolute_path_to_solution="/ws/keys",
+        )
+        container_manager.platform_client = Mock()
+        container_manager.telemetry_service = Mock()
+
+        with patch.object(
+            container_manager,
+            "_upload_terminal_artifacts",
+            return_value=("log-key-123", "out-key-456"),
+        ) as mock_upload, patch.object(
+            container_manager, "_remove_workspace", return_value=True
+        ) as mock_rm:
+            container_manager._finalize_solution_terminal(
+                sol,
+                status=ValidationFailureReason.WALL_TIME_FAILURE.value,
+                reason="Validator terminated container as overdue (exceeded max_solution_runtime_seconds=14400)",
+                attempt_extraction=False,
+                failure_reason=ValidationFailureReason.WALL_TIME_FAILURE.value,
+            )
+            mock_upload.assert_called_once_with("/ws/keys")
+            # Upload must happen before workspace cleanup so artifacts still exist.
+            assert mock_upload.call_count == 1
+            assert mock_rm.call_count == 1
+            assert mock_upload.call_args_list[0][0][0] == "/ws/keys"
+
+        call_kwargs = container_manager.platform_client.report_submission_status.call_args.kwargs
+        assert call_kwargs["log_data_key"] == "log-key-123"
+        assert call_kwargs["output_data_key"] == "out-key-456"
+        assert call_kwargs["failure_reason"] == ValidationFailureReason.WALL_TIME_FAILURE.value
+        assert "overdue" in call_kwargs["reason"]
 
     def test_finalize_is_noop_when_no_sol(self, container_manager):
         container_manager._finalize_solution_terminal(None)

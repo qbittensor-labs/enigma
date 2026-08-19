@@ -160,7 +160,11 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-testing/
+# Localnet / workbench helpers under testing/ ARE tracked in enigma-staging.
+# The Deploy Staging to Public workflow strips testing/ so it never ships to
+# qbittensor-labs/enigma. Keep local-only artifacts out of git:
+testing/**/.DS_Store
+testing/**/.mock_ed25519_private_key
 
 # Editors
 .vscode/settings.json

@@ -43,10 +43,19 @@ from qbittensor.validator.solution.constants import CHALLENGE_SOLTION_PREFIX
 from qbittensor.protocol import MinerSubmissionStatus
 from qbittensor.validator.utils.gpu_verification.gpu_access import test_gpu_container
 from qbittensor.utils.uids import is_valid_miner_axon
+from qbittensor.utils.treasury_sinks import (
+    default_sink_hotkey,
+    resolve_sink_hotkey,
+    sink_hotkeys,
+    sink_jwt_needs_refresh,
+    sink_set,
+)
 
-TREASURY_HOTKEY: str = "5DCLafsAKaLeZwm9hjMHvrQNjtucSwBhKyTLYnYmMvhxF2Uc"
+TREASURY_HOTKEY: str = os.environ.get("TREASURY_HOTKEY") or default_sink_hotkey()
 TREASURY_WALLET_AMOUNT: float = 0.99
-PRIVATE_MINER_HOTKEY: str = "5HmQDNh8BrbDeT1bjgqXZ3KGAEb9n6doozNL2mQiJ9rYmuqh"
+PRIVATE_MINER_HOTKEY: str = os.environ.get(
+    "PRIVATE_MINER_HOTKEY", "5HmQDNh8BrbDeT1bjgqXZ3KGAEb9n6doozNL2mQiJ9rYmuqh"
+)
 MIN_DUST_FLOOR: float = 2.5e-5
 
 
@@ -89,10 +98,27 @@ class Validator(BaseValidatorNeuron):
         )
         bt.logging.info(f"🗄️  Validator using DB: {self.database_connection.DB_PATH}")
 
-        # Early Docker sanity check (very important for solution execution)
-        is_docker_available()
+        # Early Docker + BuildKit check (solution builds require --progress=plain / buildx)
+        skip_host_checks = os.environ.get("ENIGMA_SKIP_GPU_CHECK", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if not is_docker_available():
+            bt.logging.error(
+                "CRITICAL: Docker CLI or BuildKit/buildx is unavailable -- unable to launch Validator. "
+                "Install a current Docker Engine with the buildx plugin "
+                "(e.g. docker-ce + docker-buildx-plugin). See logs above for details."
+            )
+            bt.logging.error("Shutting down validator.")
+            exit(1)
 
-        if not test_gpu_container():
+        if skip_host_checks:
+            bt.logging.warning(
+                "ENIGMA_SKIP_GPU_CHECK set — skipping GPU container smoke test "
+                "(localnet / machines without NVIDIA)."
+            )
+        elif not test_gpu_container():
             bt.logging.error("CRITICAL: GPU container smoke test failed -- unable to launch Validator. See qbittensor/validator/utils/gpu_verification/GPU_README.md for more details.")
             bt.logging.error("Shutting down validator.")
             exit(1)
@@ -334,6 +360,73 @@ class Validator(BaseValidatorNeuron):
                 submission_statuses=None,
             )
 
+    def _current_tempo_id(self) -> int | None:
+        """Current chain tempo index, or None if it cannot be read."""
+        try:
+            tempo = 360
+            try:
+                info = self.subtensor.subnets.info(self.config.netuid)
+                raw = getattr(info, "tempo", None)
+                if isinstance(raw, int) and raw > 0:
+                    tempo = raw
+            except Exception:
+                pass
+            block = getattr(self.subtensor, "block", None)
+            if not isinstance(block, int):
+                raw_block = getattr(self, "block", None)
+                if not isinstance(raw_block, int):
+                    return None
+                block = raw_block
+            if tempo <= 0:
+                return None
+            return int(block) // tempo
+        except Exception:
+            return None
+
+    def _resolve_treasury_sink(self) -> str:
+        """Platform sink if it is in the hardcoded list; otherwise the first sink.
+
+        A long-lived JWT that spans a tempo boundary is refreshed so every
+        validator still targets the same sink for the current tempo.
+        """
+        rm = getattr(getattr(self, "platform_client", None), "request_manager", None)
+        jwt = getattr(rm, "jwt", None) if rm is not None else None
+        jwt_sink = getattr(jwt, "sink_hotkey", None)
+        jwt_tempo = getattr(jwt, "tempo_id", None)
+        if not isinstance(jwt_sink, str):
+            jwt_sink = None
+        if not isinstance(jwt_tempo, int):
+            jwt_tempo = None
+
+        current_tempo = self._current_tempo_id()
+        if rm is not None and sink_jwt_needs_refresh(
+            sink_hotkey=jwt_sink,
+            jwt_tempo_id=jwt_tempo,
+            current_tempo_id=current_tempo,
+        ):
+            try:
+                refresh = getattr(rm, "refresh_jwt", None)
+                jwt = refresh() if callable(refresh) else None
+                jwt_sink = getattr(jwt, "sink_hotkey", None)
+                if not isinstance(jwt_sink, str):
+                    jwt_sink = None
+            except Exception as exc:
+                bt.logging.warning(f"Could not refresh platform sink JWT: {exc}")
+
+        sink = resolve_sink_hotkey(jwt_sink, fallback=TREASURY_HOTKEY)
+        if jwt_sink and jwt_sink not in sink_set():
+            bt.logging.warning(
+                f"Platform sink {jwt_sink} is not in the treasury sink list; "
+                f"defaulting to {sink}"
+            )
+        elif not jwt_sink:
+            bt.logging.warning(
+                f"No platform sink available; defaulting to {sink}"
+            )
+        else:
+            bt.logging.info(f"Treasury sink for this tempo: {sink}")
+        return sink
+
     def set_weights(self):
         """Compute maintenance incentive + treasury weights from recent verified miners (DB),
         then delegate to BaseValidatorNeuron.set_weights() which normalizes and submits on-chain.
@@ -348,6 +441,19 @@ class Validator(BaseValidatorNeuron):
             hotkeys_to_maintain: List[str] = self.database_connection.db_query.get_active_miners()
             if PRIVATE_MINER_HOTKEY not in hotkeys_to_maintain:
                 hotkeys_to_maintain.append(PRIVATE_MINER_HOTKEY)
+
+            # Platform-selected sink for this tempo (first key if missing/unknown).
+            # Idle sinks get the same keep-alive dust as maintenance miners so a
+            # full subnet cannot recycle them on tempos they are not the target.
+            treasury_hotkey = self._resolve_treasury_sink()
+            present = set(self.metagraph.hotkeys)
+            for sink in sink_hotkeys():
+                if (
+                    sink != treasury_hotkey
+                    and sink in present
+                    and sink not in hotkeys_to_maintain
+                ):
+                    hotkeys_to_maintain.append(sink)
 
             n_maintain = len(hotkeys_to_maintain)
 
@@ -366,12 +472,12 @@ class Validator(BaseValidatorNeuron):
 
             # Set treasury weight by looking up its hotkey
             treasury_uid = None
-            if TREASURY_HOTKEY in self.metagraph.hotkeys:
-                treasury_uid = self.metagraph.hotkeys.index(TREASURY_HOTKEY)
+            if treasury_hotkey in self.metagraph.hotkeys:
+                treasury_uid = self.metagraph.hotkeys.index(treasury_hotkey)
                 weights[treasury_uid] = treasury_assigned
             else:
                 bt.logging.error(
-                    f"CRITICAL: Treasury hotkey {TREASURY_HOTKEY} not found in current metagraph. "
+                    f"CRITICAL: Treasury hotkey {treasury_hotkey} not found in current metagraph. "
                     "Refusing to set weights this round to avoid emitting incorrect distribution. "
                     f"Intended dust recipients: {n_maintain} (including forced private miner)."
                 )

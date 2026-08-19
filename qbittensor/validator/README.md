@@ -24,7 +24,7 @@ Full details on the solution pipeline, Docker handling, output contract, and int
 
 ## Operational requirements
 
-- **Docker** available on the host (build, run, list, stop, rm) with permissions for the validator process.
+- **Docker Engine with BuildKit/buildx** on the host (build, run, list, stop, rm) with permissions for the validator process. The legacy builder is not supported — install `docker-buildx-plugin` (or a full current Docker Engine package set) so `docker build --progress=plain` and `docker buildx version` work.
 - Sufficient disk for download/extract/solution output paths.
 - **NVIDIA GPU** with the NVIDIA Container Toolkit installed and the NVIDIA driver installed. See [GPU_README.md](utils/gpu_verification/GPU_README.md) for more details.
 

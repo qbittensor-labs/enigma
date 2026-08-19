@@ -23,9 +23,13 @@ CROSS_CHECK_MAX_BATCH_SIZE: int = 3
 
 # --- Solutions Container Management ---
 # How often the SolutionContainerManager runs its periodic check.
-# This controls how quickly we detect completed solutions, prune exited
-# containers/images, and kill overdue ones.
-SOLUTION_CONTAINER_MANAGER_TIMEOUT: timedelta = timedelta(minutes=5)
+# This controls how quickly we detect completed/crashed solutions, prune
+# exited containers/images, and kill overdue ones. The validator calls
+# check_timer() every forward pass (~seconds); this interval is the
+# maximum time an exited container can sit before we extract + classify it.
+# Keep this well below typical milestone wall times so a 1-second crash
+# is not reported as Running for minutes.
+SOLUTION_CONTAINER_MANAGER_TIMEOUT: timedelta = timedelta(seconds=30)
 
 MAX_SOLUTIONS: int = 1
 

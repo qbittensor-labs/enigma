@@ -89,22 +89,24 @@ class BaseValidatorNeuron(BaseNeuron):
             self.axon = bt.Axon(wallet=self.wallet, config=self.config)
 
             try:
-                self.subtensor.serve_axon(
-                    netuid=self.config.netuid,
-                    axon=self.axon,
-                )
+                # v11: publish endpoint via ServeAxon intent (no Axon object on chain API).
+                self.axon.serve(netuid=self.config.netuid, subtensor=self.subtensor)
+                from qbittensor.base.neuron import _endpoint_label
+
                 bt.logging.info(
-                    f"Running validator {self.axon} on network: {self.config.subtensor.chain_endpoint} with netuid: {self.config.netuid}"
+                    f"Running validator {self.axon} on network: "
+                    f"{_endpoint_label(self.subtensor, self.config)} with netuid: {self.config.netuid}"
                 )
             except Exception as e:
-                bt.logging.error(f"Failed to serve Axon with exception: {e}")
-                pass
+                bt.logging.warning(
+                    f"ServeAxon skipped ({e}). Validators do not need a reachable "
+                    "axon; miners still must publish --axon.external_ip."
+                )
 
         except Exception as e:
             bt.logging.error(
                 f"Failed to create Axon initialize with exception: {e}"
             )
-            pass
 
     def run(self):
         """
@@ -262,42 +264,54 @@ class BaseValidatorNeuron(BaseNeuron):
         bt.logging.debug("uint_weights", uint_weights)
         bt.logging.debug("uint_uids", uint_uids)
 
-        # Set the weights on chain via our subtensor connection.
-        result, msg = self.subtensor.set_weights(
-            wallet=self.wallet,
-            netuid=self.config.netuid,
-            uids=uint_uids,
-            weights=uint_weights,
-            wait_for_finalization=False,
-            wait_for_inclusion=False,
-            version_key=self.spec_version,
-        )
-        if result is True:
-            bt.logging.info("set_weights on chain successfully!")
-        else:
-            bt.logging.error("set_weights failed", msg)
+        # Set the weights on chain via v11 SetWeights intent.
+        # Pass float proportions (SDK normalizes / quantizes); version_key is the
+        # subnet spec version so we remain compatible with on-chain checks.
+        try:
+            weight_map = {int(u): float(w) for u, w in zip(uint_uids, uint_weights)}
+            intent = bt.SetWeights(
+                netuid=self.config.netuid,
+                weights=weight_map,
+                version_key=self.spec_version,
+            )
+            result = self.subtensor.execute(
+                intent,
+                self.wallet,
+                wait_for_inclusion=False,
+                wait_for_finalization=False,
+            )
+            if getattr(result, "success", False):
+                bt.logging.info("set_weights on chain successfully!")
+            else:
+                err = getattr(result, "error", None)
+                msg = getattr(err, "remediation", None) or getattr(result, "message", result)
+                bt.logging.error("set_weights failed", msg)
+        except Exception as exc:
+            bt.logging.error(f"set_weights failed: {exc}", exc_info=True)
 
     def resync_metagraph(self):
         """Resyncs the metagraph and updates the hotkeys and moving averages based on the new metagraph."""
         bt.logging.info("resync_metagraph()")
 
-        # Copies state of metagraph before syncing.
-        previous_metagraph = copy.deepcopy(self.metagraph)
+        # Snapshot only the fields we need — MetagraphAdapter holds a live Subtensor
+        # client that is not deepcopy/pickle-safe under SDK v11.
+        previous_axons = list(self.metagraph.axons)
+        previous_hotkeys = list(self.metagraph.hotkeys)
 
         # Sync the metagraph.
         self.metagraph.sync(subtensor=self.subtensor)
 
         # Check if the metagraph axon info has changed.
-        if previous_metagraph.axons == self.metagraph.axons:
+        if previous_axons == list(self.metagraph.axons):
             return
 
         bt.logging.info(
             "Metagraph updated, re-syncing hotkeys, dendrite pool and moving averages"
         )
         # Zero out all hotkeys that have been replaced within overlapping range.
-        overlap = min(len(self.hotkeys), len(self.metagraph.hotkeys))
+        overlap = min(len(previous_hotkeys), len(self.metagraph.hotkeys))
         for uid in range(overlap):
-            if self.hotkeys[uid] != self.metagraph.hotkeys[uid]:
+            if previous_hotkeys[uid] != self.metagraph.hotkeys[uid]:
                 self.scores[uid] = 0
 
         # Resize scores to match current metagraph size (handle growth and shrink).
@@ -308,7 +322,7 @@ class BaseValidatorNeuron(BaseNeuron):
             self.scores = new_scores
 
         # Update the hotkeys.
-        self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)
+        self.hotkeys = list(self.metagraph.hotkeys)
 
     def update_scores(self, rewards: np.ndarray, uids: List[int]):
         """Performs exponential moving average on the scores based on the rewards received from the miners."""

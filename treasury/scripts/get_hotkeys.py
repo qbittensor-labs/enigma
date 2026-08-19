@@ -18,7 +18,10 @@
 # DEALINGS IN THE SOFTWARE.
 
 """
-Get associated hotkeys and voting power for an EVM validator address.
+Get associated hotkeys and voting power for an EVM identity.
+
+uidLookup is keyed by the EOA that signed associate_evm_key — the validator
+or treasury admin EOA, not the vault or governor contract.
 """
 
 import argparse
@@ -26,19 +29,42 @@ import subprocess
 import sys
 
 try:
-    from substrateinterface import Keypair
+    from bittensor.wallet import Keypair
 except ImportError:
-    sys.exit("Please install: pip install substrate-interface")
+    sys.exit("Please install: pip install bittensor")
 
 from utils.common import DEFAULT_RPC_URL
 
 BITTENSOR_VOTES_ADDRESS = "0x000000000000000000000000000000000000080D"
 
 
+def _has_contract_code(address: str, rpc: str) -> bool:
+    result = subprocess.run(
+        ["cast", "code", address, "--rpc-url", rpc],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False
+    code = result.stdout.strip().lower()
+    return bool(code) and code not in ("0x", "0x0")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Lookup hotkeys and voting power for an EVM address")
-    parser.add_argument("--contract", required=True, help="TreasuryController address")
-    parser.add_argument("--evm", required=True, help="Validator EVM address")
+    parser = argparse.ArgumentParser(
+        description="Lookup hotkeys and voting power for an associated EVM identity"
+    )
+    parser.add_argument("--contract", required=True, help="TreasuryController (governor) address")
+    parser.add_argument(
+        "--evm",
+        "--treasury-admin",
+        dest="evm",
+        required=True,
+        help=(
+            "Associated EVM identity (the EOA that signed associate_evm). "
+            "Not the vault or governor contract address."
+        ),
+    )
     parser.add_argument(
         "--rpc",
         default=DEFAULT_RPC_URL,
@@ -46,7 +72,7 @@ def main():
     )
     args = parser.parse_args()
 
-    print(f"\n🔍 Looking up EVM Address: {args.evm}")
+    print(f"\n🔍 Looking up associated EVM identity: {args.evm}")
 
     # 1. Fetch Target NetUID from the Governor
     cmd_netuid = ["cast", "call", args.contract, "TARGET_NETUID()(uint16)", "--rpc-url", args.rpc]
@@ -69,7 +95,13 @@ def main():
     output = res_hk.stdout.strip()
     if not output or output == "[]":
         print("\n   ⚠️ No hotkeys associated with this EVM address on-chain.")
-        print("   Ensure the validator has run the 'associate_evm' extrinsic correctly.")
+        if _has_contract_code(args.evm, args.rpc):
+            print("   This address has contract code (vault/governor).")
+            print("   uidLookup is keyed by the EOA that signed associate_evm,")
+            print("   usually the validator or treasury admin — not the contract.")
+        else:
+            print("   Pass the EOA used as --private-key on associate_evm.py")
+            print("   (not the vault or governor).")
         sys.exit(0)
 
     clean_output = output.strip("[]").replace('"', '').replace("'", "")
@@ -102,36 +134,6 @@ def main():
                     power = int(power_str)
             else:
                 print(f"     ⚠️ EVM Precompile Failed: {res_power.stderr.strip() or res_power.stdout.strip()}")
-
-            # 4. Fallback to direct Substrate query if EVM returns 0 or fails
-            if power == 0:
-                try:
-                    import bittensor as bt
-                    ws_url = args.rpc.replace("http://", "ws://").replace("https://", "wss://")
-                    sub = bt.Subtensor(network=ws_url)
-
-                    # Try querying known voting power maps
-                    ema_obj = None
-                    for storage_name in ["VotingPower", "ValidatorVotingPower", "VotingPowerEma"]:
-                        try:
-                            ema_obj = sub.substrate.query("SubtensorModule", storage_name, [ss58, int(netuid)])
-                            if ema_obj is not None:
-                                break
-                        except Exception:
-                            try:
-                                ema_obj = sub.substrate.query("SubtensorModule", storage_name, [int(netuid), ss58])
-                                if ema_obj is not None:
-                                    break
-                            except Exception:
-                                continue
-
-                    if ema_obj is not None:
-                        power = ema_obj.value
-                        print(f"     🔄 Bypassed EVM: Fetched native power directly from Substrate.")
-                    else:
-                        print("     ⚠️ Substrate Fallback Failed: Could not find a valid voting power map in SubtensorModule.")
-                except Exception as e:
-                    print(f"     ⚠️ Substrate Fallback Exception: {e}")
 
             total_power += power
 

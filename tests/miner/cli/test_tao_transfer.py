@@ -318,7 +318,7 @@ class TestEnsureSufficientBalanceForFee:
             tao = 0.05
 
         fake_sub = MagicMock()
-        fake_sub.get_balance.return_value = FakeBal()
+        fake_sub.balances.get.return_value = FakeBal()
         fake_sub.__enter__.return_value = fake_sub
         fake_sub.__exit__.return_value = False
 
@@ -341,7 +341,7 @@ class TestEnsureSufficientBalanceForFee:
             tao = 0.101
 
         fake_sub = MagicMock()
-        fake_sub.get_balance.return_value = FakeBal()
+        fake_sub.balances.get.return_value = FakeBal()
 
         with patch(
             "qbittensor.cli.miner.tao_transfer.bt.Subtensor"
@@ -363,7 +363,7 @@ class TestEnsureSufficientBalanceForFee:
             tao = 0.1
 
         fake_sub = MagicMock()
-        fake_sub.get_balance.return_value = FakeBal()
+        fake_sub.balances.get.return_value = FakeBal()
 
         with patch(
             "qbittensor.cli.miner.tao_transfer.bt.Subtensor"

@@ -115,3 +115,39 @@ class TestSolutionCrossChecker:
         )
         # No execute call
         # (mock not set up in this test, but if it were called it would fail since not patched)
+
+    def test_run_reports_internal_failure_if_execute_raises(self, cross_checker):
+        cross_checker.solution_container_manager.validator_is_busy.return_value = False
+        launch_ctx = MagicMock()
+        launch_ctx.__enter__.return_value = None
+        launch_ctx.__exit__.return_value = None
+        cross_checker.solution_container_manager.launching.return_value = launch_ctx
+
+        submission = ChallengeSubmissionRead(
+            id="cc-3",
+            address="5Miner",
+            challenge_milestone_id="m1",
+            challenge_id="ch-1",
+            upload_endpoint_id="upload-xyz",
+            tx_hash="0xabc",
+            file_download_url="https://example.com/z.zip",
+            transfer_block_hash="0xblock",
+            transfer_from_ss58="5From",
+            transfer_to_ss58="5Treasury",
+            transfer_amount_rao="1000000000",
+            transfer_proof_message="msg",
+            transfer_proof_signature_hex="sig",
+        )
+        cross_checker.platform_client.get_next_cross_check_submission.return_value = submission
+
+        with patch(
+            "qbittensor.validator.solution.solution_cross_check.execute_verified_solution",
+            side_effect=RuntimeError("boom"),
+        ):
+            cross_checker.run()
+
+        cross_checker.platform_client.report_submission_status.assert_called_once()
+        kwargs = cross_checker.platform_client.report_submission_status.call_args.kwargs
+        assert kwargs["submission_id"] == "cc-3"
+        assert kwargs["status"] == "Failure"
+        assert kwargs["failure_reason"] == "InternalFailure"

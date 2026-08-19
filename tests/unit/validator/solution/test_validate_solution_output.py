@@ -21,7 +21,12 @@ import os
 import pytest
 
 from qbittensor.dto.challenge import ChallengeSubmissionVerifyUploadAddressResponse
-from qbittensor.utils.solution_status import SolutionStatus, ValidationFailureReason
+from qbittensor.utils.solution_status import (
+    OutputExtractionStatus,
+    SolutionStatus,
+    ValidationFailureReason,
+    failure_reason_for_extraction,
+)
 from qbittensor.challenges.solution_output import SOLUTION_LOG_FILENAME
 from qbittensor.validator.solution.validate_solution_output import (
     establish_upload_locations_for_solution_data,
@@ -175,3 +180,176 @@ class TestValidateSolutionCorePaths:
                 output_data_key="out-id",
                 failure_reason="IncorrectFailure",
             )
+
+    def test_invalid_base64_is_not_incorrect_failure(self, tmp_path, platform_client):
+        ws = str(tmp_path / "ws")
+        os.makedirs(os.path.join(ws, "output", "solution_artifacts"))
+        platform_client.create_verification_upload_url.side_effect = [
+            Mock(id="log_id", url="log_url"),
+            Mock(id="out-id", url="out_url"),
+        ]
+        platform_client.report_submission_status.return_value = True
+
+        with patch("qbittensor.validator.solution.validate_solution_output.upload_logs_package", return_value=True), \
+                patch("qbittensor.validator.solution.validate_solution_output.upload_zip_to_platform", return_value=True), \
+                patch("qbittensor.validator.solution.validate_solution_output.validate_output") as mock_validate:
+            status = validate_solution(
+                ws,
+                platform_client,
+                submission_id="sub1",
+                challenge_milestone_id="m1",
+                challenge_id="c1",
+                exit_code=1,
+                extraction=OutputExtractionStatus.INVALID_BASE64,
+            )
+        assert status == ValidationFailureReason.INVALID_OUTPUT_BASE64.value
+        mock_validate.assert_not_called()
+        assert platform_client.report_submission_status.call_args.kwargs["failure_reason"] == (
+            ValidationFailureReason.INVALID_OUTPUT_BASE64.value
+        )
+
+    def test_invalid_zip_is_not_incorrect_failure(self, tmp_path, platform_client):
+        ws = str(tmp_path / "ws")
+        os.makedirs(os.path.join(ws, "output", "solution_artifacts"))
+        platform_client.create_verification_upload_url.side_effect = [
+            Mock(id="log_id", url="log_url"),
+            Mock(id="out-id", url="out_url"),
+        ]
+        platform_client.report_submission_status.return_value = True
+
+        with patch("qbittensor.validator.solution.validate_solution_output.upload_logs_package", return_value=True), \
+                patch("qbittensor.validator.solution.validate_solution_output.upload_zip_to_platform", return_value=True), \
+                patch("qbittensor.validator.solution.validate_solution_output.validate_output") as mock_validate:
+            status = validate_solution(
+                ws,
+                platform_client,
+                submission_id="sub1",
+                challenge_milestone_id="m1",
+                challenge_id="c1",
+                exit_code=0,
+                extraction=OutputExtractionStatus.INVALID_ZIP,
+            )
+        assert status == ValidationFailureReason.INVALID_OUTPUT_ZIP.value
+        mock_validate.assert_not_called()
+
+    def test_exit_zero_no_artifacts_is_empty_artifacts(self, tmp_path, platform_client):
+        ws = str(tmp_path / "ws")
+        os.makedirs(os.path.join(ws, "output", "solution_artifacts"))
+        platform_client.create_verification_upload_url.side_effect = [
+            Mock(id="log_id", url="log_url"),
+            Mock(id="out-id", url="out_url"),
+        ]
+        platform_client.report_submission_status.return_value = True
+
+        with patch("qbittensor.validator.solution.validate_solution_output.upload_logs_package", return_value=True), \
+                patch("qbittensor.validator.solution.validate_solution_output.upload_zip_to_platform", return_value=True), \
+                patch("qbittensor.validator.solution.validate_solution_output.validate_output") as mock_validate:
+            status = validate_solution(
+                ws,
+                platform_client,
+                submission_id="sub1",
+                challenge_milestone_id="m1",
+                challenge_id="c1",
+                exit_code=0,
+                extraction=OutputExtractionStatus.NO_SEPARATOR,
+            )
+        assert status == ValidationFailureReason.EMPTY_ARTIFACTS.value
+        mock_validate.assert_not_called()
+
+    def test_crash_without_artifacts_is_run_failure(self, tmp_path, platform_client):
+        ws = str(tmp_path / "ws")
+        os.makedirs(os.path.join(ws, "output", "solution_artifacts"))
+        platform_client.create_verification_upload_url.side_effect = [
+            Mock(id="log_id", url="log_url"),
+            Mock(id="out-id", url="out_url"),
+        ]
+        platform_client.report_submission_status.return_value = True
+
+        with patch("qbittensor.validator.solution.validate_solution_output.upload_logs_package", return_value=True), \
+                patch("qbittensor.validator.solution.validate_solution_output.upload_zip_to_platform", return_value=True), \
+                patch("qbittensor.validator.solution.validate_solution_output.validate_output") as mock_validate:
+            status = validate_solution(
+                ws,
+                platform_client,
+                submission_id="sub1",
+                challenge_milestone_id="m1",
+                challenge_id="c1",
+                exit_code=1,
+                extraction=OutputExtractionStatus.NO_SEPARATOR,
+            )
+        assert status == ValidationFailureReason.RUN_FAILURE.value
+        mock_validate.assert_not_called()
+
+    def test_skipped_extract_with_crash_is_run_failure(self, tmp_path, platform_client):
+        ws = str(tmp_path / "ws")
+        os.makedirs(os.path.join(ws, "output", "solution_artifacts"))
+        platform_client.create_verification_upload_url.side_effect = [
+            Mock(id="log_id", url="log_url"),
+            Mock(id="out-id", url="out_url"),
+        ]
+        platform_client.report_submission_status.return_value = True
+
+        with patch("qbittensor.validator.solution.validate_solution_output.upload_logs_package", return_value=True), \
+                patch("qbittensor.validator.solution.validate_solution_output.upload_zip_to_platform", return_value=True), \
+                patch("qbittensor.validator.solution.validate_solution_output.validate_output") as mock_validate:
+            status = validate_solution(
+                ws,
+                platform_client,
+                submission_id="sub1",
+                challenge_milestone_id="m1",
+                challenge_id="c1",
+                exit_code=1,
+                extraction=OutputExtractionStatus.SKIPPED,
+            )
+        assert status == ValidationFailureReason.RUN_FAILURE.value
+        mock_validate.assert_not_called()
+
+
+class TestFailureReasonForExtraction:
+    def test_extracted_artifacts_defer_to_validate_output(self):
+        assert failure_reason_for_extraction(OutputExtractionStatus.ARTIFACTS_EXTRACTED, 0) is None
+        assert failure_reason_for_extraction(OutputExtractionStatus.ARTIFACTS_EXTRACTED, 1) is None
+
+    def test_protocol_failures_are_specific(self):
+        assert (
+            failure_reason_for_extraction(OutputExtractionStatus.INVALID_BASE64, 0)
+            is ValidationFailureReason.INVALID_OUTPUT_BASE64
+        )
+        assert (
+            failure_reason_for_extraction(OutputExtractionStatus.INVALID_ZIP, 1)
+            is ValidationFailureReason.INVALID_OUTPUT_ZIP
+        )
+
+    def test_missing_artifacts_depend_on_exit_code(self):
+        assert (
+            failure_reason_for_extraction(OutputExtractionStatus.NO_SEPARATOR, 0)
+            is ValidationFailureReason.EMPTY_ARTIFACTS
+        )
+        assert (
+            failure_reason_for_extraction(OutputExtractionStatus.EMPTY_PAYLOAD, 0)
+            is ValidationFailureReason.EMPTY_ARTIFACTS
+        )
+        assert (
+            failure_reason_for_extraction(OutputExtractionStatus.NO_SEPARATOR, 1)
+            is ValidationFailureReason.RUN_FAILURE
+        )
+
+    def test_docker_logs_failure_is_internal(self):
+        assert (
+            failure_reason_for_extraction(OutputExtractionStatus.DOCKER_LOGS_FAILED, 0)
+            is ValidationFailureReason.INTERNAL_FAILURE
+        )
+
+    def test_skipped_extract_classifies_from_exit_code(self):
+        assert (
+            failure_reason_for_extraction(OutputExtractionStatus.SKIPPED, -1)
+            is ValidationFailureReason.INTERNAL_FAILURE
+        )
+        assert (
+            failure_reason_for_extraction(OutputExtractionStatus.SKIPPED, 0)
+            is ValidationFailureReason.EMPTY_ARTIFACTS
+        )
+        assert (
+            failure_reason_for_extraction(OutputExtractionStatus.SKIPPED, 1)
+            is ValidationFailureReason.RUN_FAILURE
+        )

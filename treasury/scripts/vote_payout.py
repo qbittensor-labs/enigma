@@ -29,9 +29,10 @@ import requests
 
 from utils.common import parse_oz_custom_error, DEFAULT_RPC_URL
 try:
-    from substrateinterface import SubstrateInterface, Keypair
+    from async_substrate_interface.sync_substrate import SubstrateInterface
+    from bittensor.wallet import Keypair
 except ImportError:
-    sys.exit("Please install: pip install substrate-interface")
+    sys.exit("Please install: pip install bittensor")
 
 API_BASE_URL = f"{os.getenv('CHALLENGES_API_URL', 'https://challenges.qbittensorlabs.com')}/v1"
 ALPHA_LIMIT = 25000  # Must match the limit used in your propose script

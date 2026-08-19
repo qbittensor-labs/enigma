@@ -36,6 +36,9 @@ class ValidationFailureReason(str, Enum):
     INTERNAL_FAILURE = "InternalFailure"
     ZIP_DOWNLOAD_FAILURE = "ZipDownloadFailure"
     INVALID_ZIP = "InvalidZip"
+    INVALID_OUTPUT_BASE64 = "InvalidOutputBase64"
+    INVALID_OUTPUT_ZIP = "InvalidOutputZip"
+    EMPTY_ARTIFACTS = "EmptyArtifacts"
     MISSING_DOCKERFILE = "MissingDockerfile"
     BUILD_FAILURE = "BuildFailure"
     RUN_FAILURE = "RunFailure"
@@ -55,12 +58,62 @@ class ValidationFailureReason(str, Enum):
             ValidationFailureReason.INTERNAL_FAILURE: "An unexpected internal error occurred.",
             ValidationFailureReason.ZIP_DOWNLOAD_FAILURE: "Failed to download the zip from the provided URL.",
             ValidationFailureReason.INVALID_ZIP: "The zip is invalid. It may be corrupted or not a zip at all.",
+            ValidationFailureReason.INVALID_OUTPUT_BASE64: "Solution stdout after the output separator was not valid base64.",
+            ValidationFailureReason.INVALID_OUTPUT_ZIP: "Solution stdout decoded but was not a valid zip of artifacts.",
+            ValidationFailureReason.EMPTY_ARTIFACTS: "Container exited 0 but produced no solution artifacts.",
             ValidationFailureReason.MISSING_DOCKERFILE: "The zip is missing a Dockerfile in the root directory.",
             ValidationFailureReason.BUILD_FAILURE: "Docker failed to build the image from the provided Dockerfile.",
-            ValidationFailureReason.RUN_FAILURE: "Docker failed to run the container from the built image.",
+            ValidationFailureReason.RUN_FAILURE: "The container failed to start or crashed during execution without producing solution artifacts.",
             ValidationFailureReason.IMAGE_VALIDATION_FAILURE: "The built Docker image failed validation checks and cannot be run.",
             ValidationFailureReason.INVALID_PROGRAM: "The program provided in the zip is invalid. It may be missing required files, have syntax errors, or fail other validation checks.",
             ValidationFailureReason.POLICY_VIOLATION: "Dockerfile failed security policy checks.",
             ValidationFailureReason.UPLOAD_FAILURE: "Failed to establish upload locations for validator logs or solution output.",
         }
         return _messages.get(self, "Validation failed.")
+
+
+class OutputExtractionStatus(str, Enum):
+    """Result of pulling and splitting a container's stdout protocol."""
+
+    ARTIFACTS_EXTRACTED = "artifacts_extracted"
+    NO_SEPARATOR = "no_separator"
+    EMPTY_PAYLOAD = "empty_payload"
+    INVALID_BASE64 = "invalid_base64"
+    INVALID_ZIP = "invalid_zip"
+    STDOUT_TOO_LARGE = "stdout_too_large"
+    DOCKER_LOGS_FAILED = "docker_logs_failed"
+    EXTRACT_FAILED = "extract_failed"
+    SKIPPED = "skipped"
+
+
+def failure_reason_for_extraction(
+    extraction: OutputExtractionStatus,
+    exit_code: int,
+) -> ValidationFailureReason | None:
+    """Map an extraction result + container exit code to a reported failure.
+
+    Returns None when artifacts were extracted and challenge output validation
+    should run (Success vs IncorrectFailure).
+    """
+    if extraction == OutputExtractionStatus.ARTIFACTS_EXTRACTED:
+        return None
+    if extraction == OutputExtractionStatus.INVALID_BASE64:
+        return ValidationFailureReason.INVALID_OUTPUT_BASE64
+    if extraction == OutputExtractionStatus.INVALID_ZIP:
+        return ValidationFailureReason.INVALID_OUTPUT_ZIP
+    if extraction in (
+        OutputExtractionStatus.NO_SEPARATOR,
+        OutputExtractionStatus.EMPTY_PAYLOAD,
+    ):
+        if exit_code == 0:
+            return ValidationFailureReason.EMPTY_ARTIFACTS
+        return ValidationFailureReason.RUN_FAILURE
+    if extraction == OutputExtractionStatus.DOCKER_LOGS_FAILED:
+        return ValidationFailureReason.INTERNAL_FAILURE
+    if extraction == OutputExtractionStatus.SKIPPED:
+        if exit_code < 0:
+            return ValidationFailureReason.INTERNAL_FAILURE
+        if exit_code == 0:
+            return ValidationFailureReason.EMPTY_ARTIFACTS
+        return ValidationFailureReason.RUN_FAILURE
+    return ValidationFailureReason.RUN_FAILURE
