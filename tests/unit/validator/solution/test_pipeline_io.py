@@ -231,9 +231,12 @@ class TestDockerBuildAndValidate:
         # Popen for build + run for inspect
         assert mock_popen.call_count == 1
         assert mock_run.call_count == 1
-        # Verify we passed --progress=plain
+        # BuildKit is required; we pass --progress=plain and force DOCKER_BUILDKIT=1.
         called_cmd = mock_popen.call_args[0][0]
         assert called_cmd[0:3] == ["docker", "build", "--progress=plain"]
+        env = mock_popen.call_args.kwargs.get("env", {})
+        assert env.get("DOCKER_BUILDKIT") == "1"
+        assert env.get("BUILDKIT_PROGRESS") == "plain"
 
     def test_build_image_rejects_oversized_and_deletes(self):
         from qbittensor.validator.solution.constants import MAX_SOLUTION_DOCKER_IMAGE_SIZE_BYTES
@@ -259,6 +262,7 @@ class TestDockerBuildAndValidate:
         popen_cmd = mock_popen.call_args[0][0]
         assert popen_cmd[:2] == ["docker", "build"]
         assert "--progress=plain" in popen_cmd
+        assert mock_popen.call_args.kwargs.get("env", {}).get("DOCKER_BUILDKIT") == "1"
         # Subsequent run calls: inspect then rmi
         assert calls[0][:3] == ["docker", "image", "inspect"]
         assert calls[1] == ["docker", "rmi", "-f", "my_image"]

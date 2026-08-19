@@ -45,7 +45,11 @@ Output contract (stdout-only, no shared filesystem with the validator):
 The validator captures stdout via ``docker logs``, splits at the separator,
 and extracts the base64 zip into the solution_artifacts directory.
 
-Usage: python breaking_rsa.py <challenge_id> <JSON-encoded Problem>
+Usage (direct / local CLI):
+  python breaking_rsa.py <challenge_id> <JSON-encoded Problem>
+
+Validator / workbench Docker mode: no CLI args; read
+/challenge_input/challenge_input.json from the read-only mount.
 """
 
 from datetime import datetime, timezone
@@ -71,6 +75,31 @@ from enigma_challenges.solution_output import (
     build_solution_result_zip,
     write_solution_output,
 )
+
+# Validator / workbench Docker mount (must match platform contract).
+CHALLENGE_INPUT_JSON_PATH = "/challenge_input/challenge_input.json"
+
+
+def _load_input(argv: list[str]) -> tuple[str, Problem]:
+    """CLI args for direct mode; /challenge_input mount for Docker."""
+    if len(argv) == 3:
+        return argv[1].strip(), Problem.from_json(argv[2].strip())
+
+    path = Path(CHALLENGE_INPUT_JSON_PATH)
+    if not path.is_file():
+        raise FileNotFoundError(
+            "Breaking RSA input not found: pass "
+            "'<challenge_id> <JSON Problem>' as CLI args or provide "
+            f"{CHALLENGE_INPUT_JSON_PATH} on the challenge input mount."
+        )
+    data = json.loads(path.read_text(encoding="utf-8"))
+    challenge_id = str(data.get("challenge_id") or "unknown")
+    problem = Problem(
+        difficulty=int(data["difficulty"]),
+        num=int(data["num"]),
+        num_bits=int(data["num_bits"]),
+    )
+    return challenge_id, problem
 
 
 def _printlog(msg: str) -> None:
@@ -575,14 +604,10 @@ def factor_semiprime(n: int, num_bits: int, log=None) -> tuple[Optional[int], Op
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    if len(sys.argv) != 3:
-        print("Missing args: <challenge_id> <JSON-encoded breaking_rsa.Problem>")
-        sys.exit(1)
-    challenge_id = sys.argv[1].strip()
     try:
-        problem = Problem.from_json(sys.argv[2].strip())
+        challenge_id, problem = _load_input(sys.argv)
     except Exception as err:
-        print(f"Error parsing input problem:\n{err}")
+        print(f"Error loading Breaking RSA input:\n{err}")
         sys.exit(1)
     if problem.num < 6:
         print("Error: number must be positive non-trivial semi-prime")

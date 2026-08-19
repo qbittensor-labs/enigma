@@ -16,6 +16,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Any, Iterator, List
 from datetime import datetime, timedelta, timezone
 import json
@@ -35,7 +36,11 @@ from qbittensor.constants import (
     DOCKER_BUILDER_PRUNE_UNTIL,
     DOCKER_IMAGE_PRUNE_UNTIL,
 )
-from qbittensor.utils.solution_status import SolutionStatus, ValidationFailureReason
+from qbittensor.utils.solution_status import (
+    OutputExtractionStatus,
+    SolutionStatus,
+    ValidationFailureReason,
+)
 import bittensor as bt
 
 from .docker_ops import DockerOps
@@ -43,11 +48,76 @@ from .solution_capacity import SolutionCapacity
 from .solution_context import SolutionExecution, SolutionPostProcessInfo
 
 
+def _docker_buildkit_available() -> bool:
+    """Require BuildKit so ``docker build --progress=plain`` works.
+
+    A host can have a recent Docker CLI/engine but still use the *legacy* builder
+    when the buildx plugin is missing. That path rejects ``--progress`` with
+    ``unknown flag: --progress``. We refuse to run in that state and tell the
+    operator to install/upgrade Docker properly.
+    """
+    try:
+        buildx = subprocess.run(
+            ["docker", "buildx", "version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if buildx.returncode == 0:
+            first_line = (buildx.stdout or buildx.stderr or "").strip().splitlines()
+            detail = first_line[0] if first_line else "ok"
+            bt.logging.info(f"🐳 Docker Buildx/BuildKit detected: {detail}")
+            return True
+
+        # Some installs expose BuildKit without a separate buildx binary; the
+        # practical requirement is that `docker build` accepts --progress.
+        help_result = subprocess.run(
+            ["docker", "build", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        help_text = f"{help_result.stdout or ''}{help_result.stderr or ''}"
+        if "--progress" in help_text:
+            bt.logging.info("🐳 Docker build supports --progress (BuildKit enabled)")
+            return True
+
+        bt.logging.error(
+            "❌ Docker BuildKit/buildx is required but not available.\n"
+            "   Solution builds use `docker build --progress=plain`, which needs BuildKit.\n"
+            "   Your host is falling back to the legacy builder (often because the\n"
+            "   docker-buildx plugin is missing), which fails with:\n"
+            "     unknown flag: --progress\n\n"
+            "   Fix — install/upgrade Docker Engine with the buildx plugin, e.g. on\n"
+            "   Debian/Ubuntu (Docker's official apt repo):\n"
+            "     sudo apt-get update\n"
+            "     sudo apt-get install -y docker-ce docker-ce-cli containerd.io "
+            "docker-buildx-plugin docker-compose-plugin\n"
+            "     sudo systemctl restart docker\n"
+            "     docker buildx version\n\n"
+            "   Docs: https://docs.docker.com/engine/install/\n"
+            "         https://docs.docker.com/go/buildx/\n\n"
+            f"   docker buildx version exit={buildx.returncode}\n"
+            f"   stderr: {(buildx.stderr or '').strip() or '(empty)'}"
+        )
+        return False
+    except FileNotFoundError:
+        # Caller already handles a missing docker binary.
+        return False
+    except subprocess.TimeoutExpired:
+        bt.logging.error("❌ Docker BuildKit/buildx check timed out.")
+        return False
+    except Exception as e:
+        bt.logging.error(f"❌ Unexpected error while checking Docker BuildKit: {e}")
+        return False
+
+
 def is_docker_available() -> bool:
-    """Check whether the Docker CLI is available and responsive.
+    """Check whether the Docker CLI is available and BuildKit-capable.
 
     This is called at startup to give early, clear feedback instead of
-    failing on the first solution that needs to be built/run.
+    failing on the first solution that needs to be built/run. Returns False
+    if the CLI is missing *or* if BuildKit/buildx is unavailable (legacy builder).
     """
     try:
         result = subprocess.run(
@@ -59,7 +129,7 @@ def is_docker_available() -> bool:
         if result.returncode == 0:
             version = result.stdout.strip()
             bt.logging.info(f"🐳 Docker CLI detected: {version}")
-            return True
+            return _docker_buildkit_available()
         else:
             docker_in_path = shutil.which("docker")
             bt.logging.error(
@@ -195,25 +265,44 @@ class SolutionContainerManager:
         infos = self._collect_completed_solution_infos(completed_containers)
         bt.logging.info(f"📂 Found {len(infos)} completed solutions for output validation + cleanup")
 
-        self._extract_outputs_from_completed_containers(infos)
+        infos = self._extract_outputs_from_completed_containers(infos)
 
         self._validate_and_report_solutions(infos)
 
-    def _extract_outputs_from_completed_containers(self, solutions: List[SolutionPostProcessInfo]) -> None:
+    def _extract_outputs_from_completed_containers(
+        self, solutions: List[SolutionPostProcessInfo]
+    ) -> List[SolutionPostProcessInfo]:
         """
         Pull each completed container's stdout via ``docker logs`` and split it into
         the run's log file and the solution-output zip on the host workspace.
+
+        Attaches ``exit_code`` and ``extraction`` onto the returned info objects
+        so validation can classify crashes vs incorrect output.
         """
+        updated: List[SolutionPostProcessInfo] = []
         for info in solutions:
             name = info.container_name
+            details = self._get_container_exit_details(name)
+            exit_code = details.get("exit_code", -1)
             if not self._container_has_validator_label(name):
                 bt.logging.warning(
                     f"⚠️ Skipping output extraction for container {name}; "
                     f"validator label {self.LABEL} not found"
                 )
+                updated.append(
+                    replace(
+                        info,
+                        exit_code=exit_code,
+                        extraction=OutputExtractionStatus.SKIPPED,
+                    )
+                )
                 continue
-            # We already have the path from the collected info; no extra lookup needed.
-            extract_stdout_output(name, info.workspace_path)
+            extraction = extract_stdout_output(name, info.workspace_path)
+            bt.logging.info(
+                f"📦 Extraction for '{name}': {extraction.value} (exit_code={exit_code})"
+            )
+            updated.append(replace(info, exit_code=exit_code, extraction=extraction))
+        return updated
 
     def _validate_and_report_solutions(self, solutions: List[SolutionPostProcessInfo]) -> None:
         """Validate the outputs of completed solutions and report results to the platform.
@@ -229,6 +318,8 @@ class SolutionContainerManager:
                 submission_id=info.submission_id,
                 challenge_milestone_id=info.challenge_milestone_id,
                 challenge_id=info.challenge_id,
+                exit_code=info.exit_code,
+                extraction=info.extraction,
             )
             self.database_connection.db_query.update_solution_status_by_id(
                 info.id, solution_status
@@ -725,6 +816,92 @@ class SolutionContainerManager:
         except Exception as e:
             bt.logging.warning(f"Failed to report DB expected running telemetry: {e}")
 
+    def _upload_terminal_artifacts(
+        self, workspace_path: str
+    ) -> tuple[str | None, str | None]:
+        """Best-effort upload of diagnostic artifacts before the workspace is deleted.
+
+        Used by wall-time kills and other terminal paths so the platform still gets
+        ``log_data_key`` / ``output_data_key`` when anything was captured locally
+        (docker logs extraction, docker_build.log, partial solution artifacts).
+        """
+        if not self.platform_client or not workspace_path:
+            return None, None
+
+        from qbittensor.validator.solution.constants import (
+            CONTAINER_OUTPUT_DIRNAME,
+            CONTAINER_SOLUTION_DIRNAME,
+        )
+        from qbittensor.validator.solution.validate_solution_output import (
+            establish_upload_locations_for_solution_data,
+            upload_logs_package,
+            upload_zip_to_platform,
+        )
+
+        container_output_path = os.path.join(workspace_path, CONTAINER_OUTPUT_DIRNAME)
+        if not os.path.isdir(container_output_path):
+            bt.logging.warning(
+                f"⚠️ No container output dir at {container_output_path}; "
+                "skipping terminal artifact upload"
+            )
+            return None, None
+
+        log_data_key: str | None = None
+        output_data_key: str | None = None
+
+        try:
+            logs_data = establish_upload_locations_for_solution_data(
+                workspace_path, "solution_logs", self.platform_client
+            )
+            if logs_data and upload_logs_package(container_output_path, logs_data):
+                log_data_key = logs_data.id
+                bt.logging.info(
+                    f"📤 Uploaded terminal logs package (log_data_key={log_data_key})"
+                )
+            else:
+                bt.logging.warning(
+                    "⚠️ Terminal logs package upload skipped or failed "
+                    "(platform report will continue without log_data_key)"
+                )
+        except Exception as e:
+            bt.logging.warning(f"⚠️ Failed to upload terminal logs package: {e}")
+
+        solution_folder = os.path.join(container_output_path, CONTAINER_SOLUTION_DIRNAME)
+        has_solution_files = False
+        try:
+            has_solution_files = os.path.isdir(solution_folder) and any(
+                os.scandir(solution_folder)
+            )
+        except OSError:
+            has_solution_files = False
+
+        if has_solution_files:
+            try:
+                out_data = establish_upload_locations_for_solution_data(
+                    workspace_path, "solution_output", self.platform_client
+                )
+                if out_data and upload_zip_to_platform(
+                    solution_folder,
+                    out_data,
+                    "solution_output",
+                    zip_entire_directory=True,
+                ):
+                    output_data_key = out_data.id
+                    bt.logging.info(
+                        f"📤 Uploaded terminal solution output "
+                        f"(output_data_key={output_data_key})"
+                    )
+                else:
+                    bt.logging.warning(
+                        "⚠️ Terminal solution output upload skipped or failed"
+                    )
+            except Exception as e:
+                bt.logging.warning(
+                    f"⚠️ Failed to upload terminal solution output: {e}"
+                )
+
+        return log_data_key, output_data_key
+
     def _finalize_solution_terminal(
         self,
         sol,
@@ -735,9 +912,11 @@ class SolutionContainerManager:
     ) -> None:
         """Ensures that whenever we decide a previously in-flight (RUNNING/PENDING) solution
         is terminal because its container is gone or was deliberately killed, we always:
+        - Optionally extract container logs/artifacts (if still available)
+        - Upload any captured logs/output to the platform (before workspace cleanup)
         - Update the local DB status
         - Mark it cleaned
-        - Report Failure to the platform (with reason)
+        - Report Failure to the platform (with reason + artifact keys when present)
         - Record telemetry
         """
         if not sol:
@@ -753,6 +932,20 @@ class SolutionContainerManager:
                 bt.logging.warning(f"Failed to extract output during terminal finalize for {getattr(sol, 'id', '?')}: {e}")
 
         path = getattr(sol, "absolute_path_to_solution", None)
+
+        # Upload artifacts BEFORE deleting the workspace. Overdue kills already extract
+        # into the workspace; without this step the platform only receives the message.
+        log_data_key: str | None = None
+        output_data_key: str | None = None
+        if path and self.platform_client:
+            try:
+                log_data_key, output_data_key = self._upload_terminal_artifacts(path)
+            except Exception as e:
+                bt.logging.warning(
+                    f"⚠️ Terminal artifact upload failed for solution "
+                    f"{getattr(sol, 'id', '?')}: {e}"
+                )
+
         if path:
             ws_cleaned = self._remove_workspace(path)
             if ws_cleaned:
@@ -771,9 +964,17 @@ class SolutionContainerManager:
                     status="Failure",
                     reason=reason,
                     failure_reason=failure_reason,
+                    log_data_key=log_data_key,
+                    output_data_key=output_data_key,
                 )
                 fr_note = f" fr={failure_reason}" if failure_reason else ""
-                bt.logging.info(f"📤 Reported Failure to platform for submission {sol.submission_id}{fr_note} (reason: {reason})")
+                keys_note = (
+                    f" log_data_key={log_data_key!r} output_data_key={output_data_key!r}"
+                )
+                bt.logging.info(
+                    f"📤 Reported Failure to platform for submission {sol.submission_id}"
+                    f"{fr_note}{keys_note} (reason: {reason})"
+                )
             except Exception as e:
                 bt.logging.warning(f"⚠️ Platform report failed for {sol.submission_id}: {e}")
 
@@ -787,6 +988,8 @@ class SolutionContainerManager:
                     "submission_id": getattr(sol, "submission_id", None),
                     "status": status,
                     "reason": reason,
+                    "log_data_key": log_data_key,
+                    "output_data_key": output_data_key,
                 },
             )
 
@@ -1182,21 +1385,29 @@ class SolutionContainerManager:
                 container_name = sol.container_name
                 if container_name and str(container_name).startswith("pending:"):
                     path = getattr(sol, "absolute_path_to_solution", None)
-                    if path and os.path.exists(path):
-                        # This can happen for legacy "pending:path:..." directories created
-                        # during old recovery/startup bugs. Clean it up.
-                        if self._remove_workspace(path):
-                            bt.logging.info(f"    Removed legacy pending-named directory {path}")
-                            cleaned_something = True
+                    real_workspace = (
+                        path
+                        if path and not str(path).startswith("pending:") and os.path.exists(path)
+                        else None
+                    )
+                    if real_workspace:
+                        if self._remove_workspace(real_workspace):
+                            bt.logging.info(f"    Removed leftover workspace {real_workspace}")
                         else:
-                            bt.logging.warning(f"    Error removing pending path {path}")
-                    elif path and not os.path.exists(path):
-                        bt.logging.info(f"    FS path already gone for {sol.id}, marking cleaned")
-                        cleaned_something = True
-
-                    if cleaned_something:
+                            bt.logging.warning(f"    Error removing leftover workspace {real_workspace}")
+                    # Placeholder rows mean the container never started. Always
+                    # finalize so the platform is not left in Running.
+                    if sol.solution_status in (SolutionStatus.RUNNING.value, SolutionStatus.PENDING.value):
+                        self._finalize_solution_terminal(
+                            sol,
+                            status=SolutionStatus.FAILURE.value,
+                            reason="Validator recovered lost in-flight solution on startup (pending placeholder; container never started)",
+                            attempt_extraction=False,
+                            failure_reason=ValidationFailureReason.INTERNAL_FAILURE.value,
+                        )
+                    else:
                         self.database_connection.db_query.mark_solution_cleaned(sol.id)
-                        recovered += 1
+                    recovered += 1
                     continue
 
                 state = self._get_container_state(container_name) if container_name else None

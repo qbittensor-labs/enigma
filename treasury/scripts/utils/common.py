@@ -46,7 +46,11 @@ def add_web3_arguments(parser: argparse.ArgumentParser, requires_private_key: bo
         help=f"RPC endpoint URL (default: {DEFAULT_RPC_URL})"
     )
     if requires_private_key:
-        parser.add_argument("--private-key", default=None, help="Private key (or set PRIVATE_KEY env var)")
+        parser.add_argument(
+            "--private-key",
+            default=None,
+            help="EVM private key for the 0x address (or set PRIVATE_KEY). Not a Bittensor coldkey/hotkey.",
+        )
         parser.add_argument("--force-gas-price-gwei", type=float, help="Force a specific Gas Price in Gwei")
 
 

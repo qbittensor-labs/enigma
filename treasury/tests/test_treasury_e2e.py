@@ -94,24 +94,24 @@ class TreasuryTest:
         if vault_hk_path.exists():
             with open(vault_hk_path) as f:
                 self.vault_hotkey_ss58 = json.load(f)["ss58Address"]
-                import substrateinterface
-                kp = substrateinterface.Keypair(ss58_address=self.vault_hotkey_ss58)
+                from bittensor.wallet import Keypair
+                kp = Keypair(ss58_address=self.vault_hotkey_ss58)
                 self.vault_hotkey_hex = "0x" + kp.public_key.hex()
 
         val_hk_path = base / "wallets" / "sn-creator" / "hotkeys" / "default"
         if val_hk_path.exists():
             with open(val_hk_path) as f:
                 self.validator_hotkey_ss58 = json.load(f)["ss58Address"]
-                import substrateinterface
-                kp = substrateinterface.Keypair(ss58_address=self.validator_hotkey_ss58)
+                from bittensor.wallet import Keypair
+                kp = Keypair(ss58_address=self.validator_hotkey_ss58)
                 self.validator_hotkey_hex = "0x" + kp.public_key.hex()
 
         miner_ck_path = base / "wallets" / "test-miner" / "coldkeypub.txt"
         if miner_ck_path.exists():
             with open(miner_ck_path) as f:
                 self.miner_ss58 = json.load(f).get("ss58Address")
-                import substrateinterface
-                kp = substrateinterface.Keypair(ss58_address=self.miner_ss58)
+                from bittensor.wallet import Keypair
+                kp = Keypair(ss58_address=self.miner_ss58)
                 self.miner_coldkey_hex = "0x" + kp.public_key.hex()
 
         miner_evm_path = base / "test-miner_evm_wallet.json"
@@ -124,8 +124,8 @@ class TreasuryTest:
         gov_ss58 = self.evm_to_ss58(self.contract)
         self.vault_ss58 = self.evm_to_ss58(self.vault_addr)
         if self.vault_ss58 and self.vault_ss58 not in ("unknown", "error"):
-            import substrateinterface
-            kp = substrateinterface.Keypair(ss58_address=self.vault_ss58)
+            from bittensor.wallet import Keypair
+            kp = Keypair(ss58_address=self.vault_ss58)
             self.vault_coldkey_hex = "0x" + kp.public_key.hex()
 
         admin_ss58 = self.evm_to_ss58(self.admin_addr)
@@ -153,7 +153,11 @@ class TreasuryTest:
         evm_bal = (self.get_balance(evm_addr) / 1e18) if evm_addr and "Unknown" not in evm_addr else 0.0
 
         try:
-            sub_bal = float(self.subtensor.get_balance(ss58_addr)) if ss58_addr else 0.0
+            if ss58_addr:
+                bal = self.subtensor.balances.get(ss58_addr)
+                sub_bal = float(bal.tao) if hasattr(bal, "tao") else float(bal)
+            else:
+                sub_bal = 0.0
         except Exception:
             sub_bal = 0.0
 
@@ -240,10 +244,10 @@ class TreasuryTest:
         return None
 
     def wait_for_blocks(self, num_blocks: int):
-        start = self.subtensor.get_current_block()
+        start = int(self.subtensor.block)
         target = start + num_blocks
         print(f"  ⏳ Waiting {num_blocks} blocks (current: {start})...")
-        while self.subtensor.get_current_block() < target:
+        while int(self.subtensor.block) < target:
             time.sleep(2)
 
     def wait_for_timelock(self, min_seconds: int = 12, min_blocks: int = 1):
@@ -253,7 +257,7 @@ class TreasuryTest:
         """
         print(f"  ⏳ Waiting for timelock ({min_seconds}s and {min_blocks} block)...")
         start_time = time.time()
-        start_block = self.subtensor.get_current_block()
+        start_block = int(self.subtensor.block)
 
         # 1. Wait out the real-world time
         while time.time() - start_time < min_seconds:
@@ -261,7 +265,7 @@ class TreasuryTest:
 
         # 2. Guarantee the chain has minted a block to update the EVM timestamp
         target_block = start_block + min_blocks
-        while self.subtensor.get_current_block() < target_block:
+        while int(self.subtensor.block) < target_block:
             time.sleep(2)
 
     def check_proposal_state(self, proposal_id: int) -> int:
@@ -326,11 +330,15 @@ class TreasuryTest:
         if not coldkey_ss58 or not hotkey_ss58:
             return 0.0
         try:
-            stake = self.subtensor.get_stake(
+            stake = self.subtensor.staking.get(
                 coldkey_ss58=coldkey_ss58,
                 hotkey_ss58=hotkey_ss58,
-                netuid=self.netuid
+                netuid=self.netuid,
             )
+            if hasattr(stake, "tao"):
+                return float(stake.tao)
+            if hasattr(stake, "amount"):
+                return float(stake.amount)
             return float(stake)
         except Exception as e:
             print(f"  ⚠️ Error fetching stake: {e}")
@@ -934,8 +942,8 @@ class TreasuryTest:
                             # C. Decode 32-byte Substrate Public Keys
                             elif "key" in label.lower() and clean_val.startswith("0x") and len(clean_val) == 66:
                                 try:
-                                    import substrateinterface
-                                    kp = substrateinterface.Keypair(public_key=bytes.fromhex(clean_val[2:]), ss58_format=42)
+                                    from bittensor.wallet import Keypair
+                                    kp = Keypair(public_key=bytes.fromhex(clean_val[2:]), ss58_format=42)
                                     val = f"{val} (SS58: {kp.ss58_address})"
                                 except Exception:
                                     pass

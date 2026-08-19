@@ -47,6 +47,50 @@ from workbench.report import print_report
 from qbittensor.challenges.solution_output import RESULT_JSON_FILENAME
 
 
+def _prepare_challenge_input_dir(workspace: str) -> str:
+    """Create a fresh host dir for the /challenge_input mount (validator parity)."""
+    mount_dir = os.path.join(workspace, "challenge_input_mount")
+    os.makedirs(mount_dir, mode=0o755, exist_ok=True)
+    return mount_dir
+
+
+def _write_breaking_rsa_challenge_input(mount_dir: str, problem) -> None:
+    """Write challenge_input.json matching validator breaking_rsa_setup."""
+    path = os.path.join(mount_dir, "challenge_input.json")
+    with open(path, "w") as f:
+        json.dump(problem.to_dict(), f)
+
+
+def _write_hqp_challenge_input(
+    mount_dir: str,
+    challenge_id: str,
+    difficulty: int,
+    host_qasm_path: str,
+) -> None:
+    """Write circuit.qasm + challenge_input.json matching validator hqp_setup."""
+    qasm_dest = os.path.join(mount_dir, "circuit.qasm")
+    shutil.copy2(host_qasm_path, qasm_dest)
+
+    challenge_input = {
+        "challenge_id": challenge_id,
+        "difficulty": difficulty,
+        "qasm_file": "/challenge_input/circuit.qasm",
+    }
+    path = os.path.join(mount_dir, "challenge_input.json")
+    with open(path, "w") as f:
+        json.dump(challenge_input, f)
+
+
+def _write_mock_challenge_input(mount_dir: str) -> None:
+    """Write challenge_input.txt matching validator mock_solution_setup."""
+    path = os.path.join(mount_dir, "challenge_input.txt")
+    with open(path, "w") as f:
+        f.write(
+            "This is a simple solution setup file. "
+            "The output should include the word 'Hello'. Hello!"
+        )
+
+
 def _warn_non_default(wall_time, allow_network):
     """Warn when settings diverge from validator defaults."""
     warnings = []
@@ -146,8 +190,10 @@ def test_breaking_rsa(difficulty, solution, mode, seed, wall_time, allow_network
         "Problem:    ": problem_json,
     }
 
-    # Create output directory
-    output_dir = tempfile.mkdtemp(prefix="workbench-")
+    # Workspace holds output + challenge_input_mount (Docker parity with validator)
+    workspace = tempfile.mkdtemp(prefix="workbench-")
+    output_dir = os.path.join(workspace, "output")
+    os.makedirs(output_dir, exist_ok=True)
 
     build_result = None
     run_result = None
@@ -163,8 +209,10 @@ def test_breaking_rsa(difficulty, solution, mode, seed, wall_time, allow_network
                 )
                 sys.exit(1)
 
+            mount_dir = _prepare_challenge_input_dir(workspace)
+            _write_breaking_rsa_challenge_input(mount_dir, problem)
             run_result = run_container(
-                "breaking_rsa", challenge_id, problem_json, output_dir,
+                "breaking_rsa", mount_dir, output_dir,
                 timeout=wall_time, network=allow_network,
             )
         else:
@@ -202,8 +250,9 @@ def test_breaking_rsa(difficulty, solution, mode, seed, wall_time, allow_network
     finally:
         if keep_output:
             click.echo(f"Output kept at: {output_dir}")
+            click.echo(f"Workspace kept at: {workspace}")
         else:
-            shutil.rmtree(output_dir, ignore_errors=True)
+            shutil.rmtree(workspace, ignore_errors=True)
 
     sys.exit(0 if success else 1)
 
@@ -235,17 +284,7 @@ def test_hardening_quantum_proof(difficulty, solution, mode, circuit, wall_time,
         sys.exit(1)
 
     challenge_id = str(uuid.uuid4())
-
-    # For Docker mode, set qasm_file to the container path
-    if mode == "docker":
-        from qbittensor.challenges.hardening_quantum_proof import Problem as HQPProblem
-        problem_for_container = HQPProblem(
-            difficulty=problem.difficulty,
-            qasm_file="/app/peaked-circuit.qasm",
-        )
-        problem_json = problem_for_container.to_json()
-    else:
-        problem_json = problem.to_json()
+    problem_json = problem.to_json()
 
     problem_summary = {
         "Circuit:    ": circuit_id,
@@ -253,7 +292,9 @@ def test_hardening_quantum_proof(difficulty, solution, mode, circuit, wall_time,
         "Qubits:     ": len(verif.peaked_state),
     }
 
-    output_dir = tempfile.mkdtemp(prefix="workbench-")
+    workspace = tempfile.mkdtemp(prefix="workbench-")
+    output_dir = os.path.join(workspace, "output")
+    os.makedirs(output_dir, exist_ok=True)
 
     build_result = None
     run_result = None
@@ -269,9 +310,13 @@ def test_hardening_quantum_proof(difficulty, solution, mode, circuit, wall_time,
                 )
                 sys.exit(1)
 
+            mount_dir = _prepare_challenge_input_dir(workspace)
+            _write_hqp_challenge_input(
+                mount_dir, challenge_id, problem.difficulty, problem.qasm_file,
+            )
             run_result = run_container(
-                "hardening_quantum_proof", challenge_id, problem_json, output_dir,
-                timeout=wall_time, qasm_file=problem.qasm_file, network=allow_network,
+                "hardening_quantum_proof", mount_dir, output_dir,
+                timeout=wall_time, network=allow_network,
             )
         else:
             entry = find_entry_point(solution, "hardening_quantum_proof")
@@ -306,8 +351,9 @@ def test_hardening_quantum_proof(difficulty, solution, mode, circuit, wall_time,
     finally:
         if keep_output:
             click.echo(f"Output kept at: {output_dir}")
+            click.echo(f"Workspace kept at: {workspace}")
         else:
-            shutil.rmtree(output_dir, ignore_errors=True)
+            shutil.rmtree(workspace, ignore_errors=True)
 
     sys.exit(0 if success else 1)
 
@@ -357,7 +403,9 @@ def test_mock(difficulty, solution, mode, private_key, public_key, wall_time, al
         "Public key: ": verif.public_key_hex[:16] + "...",
     }
 
-    output_dir = tempfile.mkdtemp(prefix="workbench-")
+    workspace = tempfile.mkdtemp(prefix="workbench-")
+    output_dir = os.path.join(workspace, "output")
+    os.makedirs(output_dir, exist_ok=True)
 
     build_result = None
     run_result = None
@@ -373,9 +421,12 @@ def test_mock(difficulty, solution, mode, private_key, public_key, wall_time, al
                 )
                 sys.exit(1)
 
+            mount_dir = _prepare_challenge_input_dir(workspace)
+            _write_mock_challenge_input(mount_dir)
             run_result = run_container(
-                "mock", challenge_id, problem_json, output_dir,
-                timeout=wall_time, env_vars={"ENIGMA_MOCK_PRIVATE_KEY": priv_key},
+                "mock", mount_dir, output_dir,
+                timeout=wall_time,
+                env_vars={"ENIGMA_MOCK_PRIVATE_KEY": priv_key},
                 network=allow_network,
             )
         else:
@@ -411,8 +462,9 @@ def test_mock(difficulty, solution, mode, private_key, public_key, wall_time, al
     finally:
         if keep_output:
             click.echo(f"Output kept at: {output_dir}")
+            click.echo(f"Workspace kept at: {workspace}")
         else:
-            shutil.rmtree(output_dir, ignore_errors=True)
+            shutil.rmtree(workspace, ignore_errors=True)
 
     sys.exit(0 if success else 1)
 

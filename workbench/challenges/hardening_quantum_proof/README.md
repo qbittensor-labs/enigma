@@ -74,7 +74,7 @@ your solver should be general-purpose.
 
 ## Input
 
-In **validator Docker mode**, the validator mounts a read-only directory at
+In **validator / workbench Docker mode**, a read-only directory is mounted at
 ``/challenge_input/`` containing:
 
 | File | Description |
@@ -86,7 +86,7 @@ Your solver should read ``/challenge_input/challenge_input.json`` when no CLI
 arguments are provided. See ``load_solver_input()`` in
 ``enigma_challenges.hardening_quantum_proof``.
 
-**Workbench / local CLI mode** may also pass two positional arguments:
+**Direct / local CLI mode** may also pass two positional arguments:
 
 1. ``<challenge_id>`` -- a UUID identifying the challenge instance
 2. ``<problem_json>`` -- a JSON string with the following fields:

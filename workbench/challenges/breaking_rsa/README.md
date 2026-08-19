@@ -37,7 +37,17 @@ Solutions are executed by validators under these conditions:
 
 ## Input
 
-Your solver receives two positional CLI arguments:
+In **validator / workbench Docker mode**, the container receives **no CLI
+arguments**. A read-only directory is mounted at `/challenge_input/` containing:
+
+| File | Description |
+|------|-------------|
+| `challenge_input.json` | Problem fields (see below) |
+
+Your solver should read `/challenge_input/challenge_input.json` when no CLI
+arguments are provided.
+
+**Direct / local CLI mode** may also pass two positional arguments:
 
 1. `<challenge_id>` -- a UUID identifying the challenge instance
 2. `<problem_json>` -- a JSON string with the following fields:

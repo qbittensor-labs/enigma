@@ -49,10 +49,13 @@ class TestDockerOps:
             assert ops.stop("ctr1") is True
             assert ops.rm("ctr1", volumes=True) is True
 
-    def test_check_available_delegates(self):
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="Docker version 24", returncode=0)
+    def test_check_available_delegates_to_is_docker_available(self):
+        with patch(
+            "qbittensor.validator.solution.solution_container_manager.is_docker_available",
+            return_value=True,
+        ) as mock_check:
             assert DockerOps.check_available() is True
+            mock_check.assert_called_once()
 
 
 class TestDockerOpsRun:

@@ -100,10 +100,10 @@ class ProposalViewer:
 
                 ss58_keys = []
                 try:
-                    import substrateinterface
+                    from bittensor.wallet import Keypair
                     for hk in hex_keys:
                         if hk.startswith("0x") and len(hk) == 66:
-                            kp = substrateinterface.Keypair(public_key=bytes.fromhex(hk[2:]), ss58_format=42)
+                            kp = Keypair(public_key=bytes.fromhex(hk[2:]), ss58_format=42)
                             ss58_keys.append(kp.ss58_address)
                         else:
                             ss58_keys.append(hk)
@@ -165,8 +165,8 @@ class ProposalViewer:
                                     pass
                             elif "key" in label.lower() and clean_val.startswith("0x") and len(clean_val) == 66:
                                 try:
-                                    import substrateinterface
-                                    kp = substrateinterface.Keypair(public_key=bytes.fromhex(clean_val[2:]), ss58_format=42)
+                                    from bittensor.wallet import Keypair
+                                    kp = Keypair(public_key=bytes.fromhex(clean_val[2:]), ss58_format=42)
                                     val = f"{val} (SS58: {kp.ss58_address})"
                                 except Exception:
                                     pass

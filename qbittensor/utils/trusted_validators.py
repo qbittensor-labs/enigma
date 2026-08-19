@@ -47,6 +47,7 @@ import bittensor as bt
 DEFAULT_TRUSTED_HOTKEYS: list[str] = [
     "5GzjAcUcD3pFk5ybJ1qP4tMfnyk2Kh3SX8R2kMQwPU2dTs63",
     "5EZ52JMq4S7PYqzmLAggYahyDirMx3p1f1uBtLQgx6fk7kR8",
+    "5D7etdUeLm4JsSZGkBrHoiyjezPHAJUiafEd5XU4wNnWSL63",
 ]
 
 

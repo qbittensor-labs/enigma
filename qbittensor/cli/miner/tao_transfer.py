@@ -18,11 +18,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 import bittensor as bt
 import click
-from bittensor_wallet import Keypair
+from bittensor.wallet import Keypair
 from rich.console import Console
 from rich.text import Text
 
@@ -79,6 +79,33 @@ def build_fee_binding_remark(
     return "\n".join(lines).encode("utf-8")
 
 
+def _extrinsic_hash_from_block(subtensor: bt.Subtensor, block_hash: str, extrinsic_id: str) -> str:
+    """Resolve blake2 extrinsic hash from ``block_number-index`` via SubstrateInterface."""
+    from async_substrate_interface.sync_substrate import SubstrateInterface
+
+    try:
+        idx = int(str(extrinsic_id).split("-")[-1])
+    except ValueError as e:
+        raise ValueError(f"unrecognized extrinsic_id {extrinsic_id!r}") from e
+
+    endpoint = getattr(subtensor, "endpoint", None) or "ws://127.0.0.1:9944"
+    substrate = getattr(subtensor, "substrate", None) or SubstrateInterface(url=endpoint)
+    block = substrate.get_block(block_hash=block_hash)
+    extrinsics = block.get("extrinsics") if isinstance(block, dict) else None
+    if not isinstance(extrinsics, list) or not (0 <= idx < len(extrinsics)):
+        raise ValueError(f"extrinsic index {idx} not in block {block_hash}")
+    ex = extrinsics[idx]
+    value = getattr(ex, "value", None) or {}
+    h = value.get("extrinsic_hash") if isinstance(value, dict) else None
+    if not h:
+        raw = getattr(ex, "extrinsic_hash", None)
+        if isinstance(raw, (bytes, bytearray)):
+            h = "0x" + raw.hex()
+    if not h:
+        raise ValueError(f"could not read extrinsic_hash for {extrinsic_id} in {block_hash}")
+    return str(h)
+
+
 def transfer_fee_extrinsic_subtensor(
     *,
     subtensor: bt.Subtensor,
@@ -88,6 +115,7 @@ def transfer_fee_extrinsic_subtensor(
     miner_hotkey: str,
     milestone_id: str,
     upload_endpoint_id: str,
+    wallet: Optional[Any] = None,
 ) -> TransferProofTx:
     """
     Submit the fee payment as a Utility.batch_all containing:
@@ -106,7 +134,41 @@ def transfer_fee_extrinsic_subtensor(
 
     amount_rao = str(int(bt.Balance.from_tao(fee_tao).rao))
 
-    # Build the two calls
+    remark_data = build_fee_binding_remark(
+        miner_hotkey=miner_hotkey,
+        milestone_id=milestone_id,
+        upload_endpoint_id=upload_endpoint_id,
+        amount_rao=amount_rao,
+    )
+
+    # Bittensor SDK v11: compose/submit_call (no subtensor.substrate).
+    # Prefer the legacy substrate path when tests inject a mock .substrate.
+    if getattr(subtensor, "substrate", None) is None and hasattr(subtensor, "submit_call") and hasattr(bt, "calls"):
+        if wallet is None:
+            raise ValueError("wallet is required to submit the v11 fee-payment batch")
+        transfer_call = subtensor.compose(
+            bt.calls.Balances.transfer_keep_alive(
+                dest=TRANSFER_DEST_SS58,
+                value=int(amount_rao),
+            )
+        )
+        remark_call = subtensor.compose(
+            bt.calls.System.remark_with_event(remark=list(remark_data))
+        )
+        batch_call = bt.calls.Utility.batch_all(calls=[transfer_call, remark_call])
+        result = subtensor.submit_call(batch_call, wallet)
+        if not getattr(result, "success", False):
+            raise ValueError(
+                f"Fee payment batch failed: {getattr(result, 'error', None) or getattr(result, 'message', result)}"
+            )
+        block_hash = getattr(result, "block_hash", None)
+        extrinsic_id = getattr(result, "extrinsic_id", None)
+        if not block_hash or not extrinsic_id:
+            raise ValueError("Fee payment succeeded but block_hash/extrinsic_id were not returned.")
+        ex_hash = _extrinsic_hash_from_block(subtensor, str(block_hash), str(extrinsic_id))
+        return TransferProofTx(extrinsic_hash=ex_hash, block_hash=str(block_hash))
+
+    # Pre-v11 substrate path (kept for unit tests that mock .substrate).
     transfer_call = subtensor.substrate.compose_call(
         call_module="Balances",
         call_function="transfer_keep_alive",
@@ -114,13 +176,6 @@ def transfer_fee_extrinsic_subtensor(
             "dest": TRANSFER_DEST_SS58,
             "value": int(amount_rao),
         },
-    )
-
-    remark_data = build_fee_binding_remark(
-        miner_hotkey=miner_hotkey,
-        milestone_id=milestone_id,
-        upload_endpoint_id=upload_endpoint_id,
-        amount_rao=amount_rao,
     )
 
     remark_call = subtensor.substrate.compose_call(
@@ -167,6 +222,7 @@ def transfer_tao_for_submission(
     miner_hotkey: str,
     milestone_id: str,
     upload_endpoint_id: str,
+    wallet: Optional[Any] = None,
 ) -> TransferProofTx:
     """
     High-level helper used by the miner CLI.
@@ -203,6 +259,7 @@ def transfer_tao_for_submission(
                 miner_hotkey=miner_hotkey,
                 milestone_id=milestone_id,
                 upload_endpoint_id=upload_endpoint_id,
+                wallet=wallet,
             )
     except ValueError as e:
         raise click.ClickException(f"Fee payment transaction failed: {e}") from e
@@ -244,8 +301,13 @@ def ensure_sufficient_balance_for_fee(
 
     try:
         with bt.Subtensor(network=network) as subtensor:
-            bal: bt.Balance = subtensor.get_balance(source_ss58)
-            available = bal.tao
+            bal = subtensor.balances.get(source_ss58)
+            if hasattr(bal, "tao"):
+                available = float(bal.tao)
+            elif hasattr(bal, "amount"):
+                available = float(bal.amount)
+            else:
+                available = float(bal)
     except Exception as e:
         # Fail closed: do not proceed to upload if we cannot confirm the payer has funds.
         raise click.ClickException(

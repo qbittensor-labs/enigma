@@ -21,20 +21,15 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from bittensor_wallet import Keypair
+from bittensor.wallet import Keypair
 
 from qbittensor.dto.challenge import TransferProof
 
 
 TRANSFER_DEST_SS58 = "5D82xX2p14X7gCGKu2Hpf8feNAzeXefgoeh4UJgVRpVTbVP4"
 
-try:
-    from async_substrate_interface.errors import ExtrinsicNotFound
-except ImportError:  # pragma: no cover
-    try:
-        from substrateinterface.exceptions import ExtrinsicNotFound
-    except ImportError:
-        ExtrinsicNotFound = type("ExtrinsicNotFound", (Exception,), {})
+from async_substrate_interface.errors import ExtrinsicNotFound
+from async_substrate_interface.sync_substrate import SubstrateInterface
 
 import bittensor as bt
 
@@ -49,6 +44,39 @@ ARCHIVE_CHAIN_ENDPOINT = os.environ.get(
 
 # Module-level cache so we don't re-instantiate the archive subtensor on every verification.
 _ARCHIVE_SUBSTRATE: Any = None
+
+
+def _get_hotkey_owner(subtensor: Any, hotkey_ss58: str) -> Any:
+    """Resolve coldkey owner for a hotkey via ``subtensor.neurons.hotkey_owner``."""
+    return subtensor.neurons.hotkey_owner(hotkey_ss58=hotkey_ss58)
+
+
+_ENDPOINT_SUBSTRATE: dict[str, Any] = {}
+
+
+def _get_substrate(subtensor: Any, archive_endpoint: str | None = None) -> Any | None:
+    """Return a substrate-interface-like object for extrinsic lookups.
+
+    Prefer an injected ``subtensor.substrate`` (unit tests / custom clients).
+    On SDK v11 the Subtensor wrapper has no ``.substrate``; open a
+    SubstrateInterface against the same endpoint so localnet lookups work.
+    Archive is the last resort for pruned historical blocks.
+    """
+    substrate = getattr(subtensor, "substrate", None)
+    if substrate is not None:
+        return substrate
+    endpoint = getattr(subtensor, "endpoint", None)
+    if endpoint:
+        cached = _ENDPOINT_SUBSTRATE.get(endpoint)
+        if cached is not None:
+            return cached
+        try:
+            si = SubstrateInterface(url=endpoint)
+            _ENDPOINT_SUBSTRATE[endpoint] = si
+            return si
+        except Exception as e:
+            bt.logging.debug(f"Could not open SubstrateInterface at {endpoint}: {e}")
+    return _get_archive_substrate(archive_endpoint)
 
 
 def _get_archive_substrate(archive_endpoint: str | None = None) -> Any | None:
@@ -71,11 +99,7 @@ def _get_archive_substrate(archive_endpoint: str | None = None) -> Any | None:
         return _ARCHIVE_SUBSTRATE
 
     try:
-        # In bittensor >= v9/v10 the preferred way is to pass archive_endpoints.
-        # This tells the Subtensor to use these for historical queries (retrieve_extrinsic_by_hash,
-        # get_block on old blocks, etc.) when the primary lite endpoint can't serve them.
-        archive_subtensor = bt.Subtensor(archive_endpoints=[endpoint])
-        _ARCHIVE_SUBSTRATE = archive_subtensor.substrate
+        _ARCHIVE_SUBSTRATE = SubstrateInterface(url=endpoint)
         bt.logging.info(
             f"Connected to Bittensor archive endpoint for historical extrinsic verification: {endpoint}"
         )
@@ -678,17 +702,14 @@ def verify_transfer_proof_for_synapse(
     if not kp.verify(msg.encode("utf-8"), sig_bytes):
         return False, "hotkey signature verification failed"
 
-    owner = subtensor.get_hotkey_owner(miner_hotkey_ss58)
-    if owner is None:
+    owner_ss58 = _get_hotkey_owner(subtensor, miner_hotkey_ss58)
+    if not owner_ss58:
         return (
             False,
             "miner hotkey has no on-chain owner (hotkey not registered?); "
             "cannot bind transfer sender to miner coldkey",
         )
-
-    owner_ss58 = owner if isinstance(owner, str) else getattr(owner, "value", owner)
-    if not isinstance(owner_ss58, str):
-        owner_ss58 = str(owner_ss58)
+    owner_ss58 = str(owner_ss58)
     if owner_ss58 != t_from:
         return (
             False,
@@ -696,7 +717,7 @@ def verify_transfer_proof_for_synapse(
             f"for miner hotkey {miner_hotkey_ss58}",
         )
 
-    substrate = subtensor.substrate
+    substrate = _get_substrate(subtensor, archive_endpoint=archive_endpoint)
     if substrate is None:
         return False, "subtensor.substrate is not available for on-chain verification"
 

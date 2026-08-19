@@ -19,9 +19,16 @@
 Converts evm address into bittensor ss58 address
 """
 
-from substrateinterface.utils.hasher import blake2_256
-from substrateinterface import Keypair
+import hashlib
 import sys
+
+from bittensor.wallet import Keypair
+
+
+def blake2_256(data: bytes) -> bytes:
+    return hashlib.blake2b(data, digest_size=32).digest()
+
+
 addr_str = (sys.argv[1] or "").strip()
 if addr_str.startswith("0x") or addr_str.startswith("0X"):
     addr_str = addr_str[2:]

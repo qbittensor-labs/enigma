@@ -225,24 +225,40 @@ class SolutionCrossChecker:
         # Use the launching() context manager. This immediately updates capacity
         # (so validator_is_busy() returns True for the rest of this forward and for
         # future /next polls) and guarantees we release the slot even on exceptions.
-        with self.solution_container_manager.launching():
-            # For cross-checks we pass the original upload_endpoint_id (the "file upload")
-            # as challenge_validation_solution_id so that the DB guard can recognize it as
-            # the same work item (tx + file upload + challenge + milestone) even if the
-            # cross-check submission uses a different .id .
-            image_name, container_id, folder_name = execute_verified_solution(
-                db_conn=self.database_connection,
-                platform_client=self.platform_client,
-                validator_label=self.validator_label,
-                download_url=submission.file_download_url,
-                challenge_id=challenge_id,
-                challenge_milestone_id=submission.challenge_milestone_id,
-                challenge_validation_solution_id=submission.upload_endpoint_id,
-                submission_id=submission.id,
-                tx_hash=submission.tx_hash,
-                miner_hotkey=submission.address,
-                telemetry_service=self.telemetry_service,
+        try:
+            with self.solution_container_manager.launching():
+                # For cross-checks we pass the original upload_endpoint_id (the "file upload")
+                # as challenge_validation_solution_id so that the DB guard can recognize it as
+                # the same work item (tx + file upload + challenge + milestone) even if the
+                # cross-check submission uses a different .id .
+                image_name, container_id, folder_name = execute_verified_solution(
+                    db_conn=self.database_connection,
+                    platform_client=self.platform_client,
+                    validator_label=self.validator_label,
+                    download_url=submission.file_download_url,
+                    challenge_id=challenge_id,
+                    challenge_milestone_id=submission.challenge_milestone_id,
+                    challenge_validation_solution_id=submission.upload_endpoint_id,
+                    submission_id=submission.id,
+                    tx_hash=submission.tx_hash,
+                    miner_hotkey=submission.address,
+                    telemetry_service=self.telemetry_service,
+                )
+        except Exception as e:
+            # Last-resort: never let a cross-check exception leave the platform
+            # assignment in Running with no terminal report.
+            bt.logging.error(
+                f"❌ Uncaught error during cross-check execution for submission {submission.id}: "
+                f"{type(e).__name__}: {e}",
+                exc_info=True,
             )
+            self.platform_client.report_submission_status(
+                submission_id=submission.id,
+                status="Failure",
+                reason=f"Internal failure during cross-check execution: {type(e).__name__}: {e}"[:2000],
+                failure_reason=ValidationFailureReason.INTERNAL_FAILURE.value,
+            )
+            return
 
         duration = time.time() - start_time
 

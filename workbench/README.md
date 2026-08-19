@@ -72,13 +72,16 @@ python -m workbench keygen
 1. **Generate** -- Creates a challenge instance (problem + verification data)
 2. **Build** -- (Docker mode) Assembles a build context with your solution and
    the `challenges` package (provided as `enigma_challenges/` in the context), then runs `docker build`
-3. **Run** -- Executes your solver with the challenge ID and problem JSON as
-   arguments. In Docker mode (the default, matching the validator), the root
+3. **Run** -- Executes your solver. In Docker mode (the default, matching the
+   validator), challenge inputs are provided via a **read-only mount** at
+   `/challenge_input/` (typically `challenge_input.json`, plus challenge-specific
+   files such as `circuit.qasm` for HQP). No CLI args are passed. The root
    filesystem is read-only and no output volume is mounted. Your solver must
    emit results exclusively via stdout using the solution output protocol
    (logs + separator + base64 zip). The validator/workbench captures this
-   after the container exits. In direct mode, the `OUTPUT_DIR` env var is
-   provided for convenience and files may be written there.
+   after the container exits. In direct mode, inputs are passed as CLI args
+   (`<challenge_id> <problem_json>`) and the `OUTPUT_DIR` env var is provided
+   for convenience so files may be written there.
 4. **Validate** -- Checks that required output files exist and conform to the
    expected schema (see RESULT_JSON_FILENAME, SOLUTION_LOG_FILENAME, SOLVE_INFO_JSON_FILENAME in solution_output.py)
 5. **Verify** -- Compares your solution against the known answer
@@ -94,10 +97,12 @@ Your solution directory should contain:
   (read-only rootfs, non-root user, limited tmpfs at /tmp for scratch only,
   no network, etc.). See the example Dockerfiles and the "Runtime constraints"
   sections in the individual challenge READMEs.
-- **`<challenge_name>.py`** -- Your solver script. Receives `<challenge_id>`
-  and `<problem_json>` as CLI arguments. In Docker mode it must emit its final
-  artifacts via the stdout protocol (not by writing files inside the container).
-  Direct mode provides `OUTPUT_DIR` for local convenience.
+- **`<challenge_name>.py`** -- Your solver script. In Docker/validator mode it
+  reads `/challenge_input/challenge_input.json` (and any sibling files) and
+  must emit final artifacts via the stdout protocol (not by writing files
+  inside the container). Direct mode may pass `<challenge_id>` and
+  `<problem_json>` as CLI arguments and provides `OUTPUT_DIR` for local
+  convenience.
 
 See `workbench/challenges/*/example_solution/` for working examples.
 
