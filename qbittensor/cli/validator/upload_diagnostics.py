@@ -253,10 +253,14 @@ def _load_validator_keypair(console: Console, name: str | None, hotkey: str | No
     """Load the hotkey keypair used for JWT signing (same pattern as other CLIs)."""
     import bittensor as bt  # lazy to avoid polluting --help with bt global logging options
     try:
+        from qbittensor.bt_compat import wallet_kwargs
+
         wallet = bt.Wallet(
-            name=name or "validator",
-            hotkey=hotkey or "default",
-            path=path,
+            **wallet_kwargs(
+                name=name or "validator",
+                hotkey=hotkey or "default",
+                path=path,
+            )
         )
         return wallet.hotkey, wallet.hotkey.ss58_address
     except Exception as e:

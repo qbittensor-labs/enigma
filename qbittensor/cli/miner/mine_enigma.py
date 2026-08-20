@@ -40,6 +40,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from qbittensor.bt_compat import wallet_kwargs
 from qbittensor.utils.env import get_api_config
 from qbittensor.utils.services.challenges import ChallengesClient
 
@@ -143,12 +144,16 @@ def _resolve_cli_api_auth(
 
     net = (network or os.getenv("NETWORK") or "finney").strip() or "finney"
 
+    path = wallet_path or os.getenv("WALLET_PATH")
+    if path is not None:
+        path = path.strip() or None
+
     return CliApiAuth(
         wallet_name=cold,
         wallet_hotkey=hot,
         network=net,
         netuid=_resolve_cli_netuid(netuid),
-        wallet_path=wallet_path,
+        wallet_path=path,
     )
 
 
@@ -171,7 +176,7 @@ def _load_signing_keypair(console: Console, auth: CliApiAuth) -> Keypair:
                 f"MINER_KEYFILE_PATH is set but the file does not exist: {env_path}"
             )
         try:
-            return bt.Keyfile(path=str(env_path)).keypair
+            return bt.Keyfile(path=str(env_path)).get_keypair()
         except Exception as e:
             raise click.ClickException(
                 f"Failed to load signing key from MINER_KEYFILE_PATH={env_path}\n{e}"
@@ -180,9 +185,11 @@ def _load_signing_keypair(console: Console, auth: CliApiAuth) -> Keypair:
     # Normal path: use the bittensor wallet configuration
     try:
         wallet = bt.Wallet(
-            name=auth.wallet_name,
-            hotkey=auth.wallet_hotkey,
-            path=auth.wallet_path,
+            **wallet_kwargs(
+                name=auth.wallet_name,
+                hotkey=auth.wallet_hotkey,
+                path=auth.wallet_path,
+            )
         )
         return wallet.hotkey
     except Exception as e:
@@ -576,9 +583,11 @@ def run_milestone_solution_upload(
 
     try:
         fee_wallet = bt.Wallet(
-            name=api_auth.wallet_name,
-            hotkey=api_auth.wallet_hotkey,
-            path=api_auth.wallet_path,
+            **wallet_kwargs(
+                name=api_auth.wallet_name,
+                hotkey=api_auth.wallet_hotkey,
+                path=api_auth.wallet_path,
+            )
         )
         submit_solution(
             console,
@@ -1494,9 +1503,11 @@ def _get_miner_hotkey_ss58(api_auth: CliApiAuth) -> str:
 
     try:
         wallet = bt.Wallet(
-            name=api_auth.wallet_name,
-            hotkey=api_auth.wallet_hotkey,
-            path=api_auth.wallet_path,
+            **wallet_kwargs(
+                name=api_auth.wallet_name,
+                hotkey=api_auth.wallet_hotkey,
+                path=api_auth.wallet_path,
+            )
         )
         return wallet.hotkey.ss58_address
     except Exception as e:

@@ -200,6 +200,26 @@ def config_from_parser(parser: argparse.ArgumentParser, args: Optional[list[str]
     return Config(**vars(_ns_from_dict(tree)))
 
 
+def wallet_kwargs(
+    *,
+    name: str = "default",
+    hotkey: str = "default",
+    path: str | None = None,
+) -> dict[str, str]:
+    """Build ``bt.Wallet`` kwargs without passing ``path=None``.
+
+    Bittensor v11 does ``Path(self.path)`` in ``Wallet.__init__``. Explicitly
+    passing ``path=None`` (Click's default for optional ``--wallet.path``)
+    raises ``TypeError: argument should be a str or an os.PathLike object
+    ... not 'NoneType'``. Omitting the kwarg uses the SDK default
+    (``~/.bittensor/wallets``).
+    """
+    kwargs: dict[str, str] = {"name": name, "hotkey": hotkey}
+    if path:
+        kwargs["path"] = path
+    return kwargs
+
+
 def wallet_add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--wallet.name", type=str, default="default")
     parser.add_argument("--wallet.hotkey", type=str, default="default")
