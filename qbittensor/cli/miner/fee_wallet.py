@@ -38,6 +38,8 @@ import bittensor as bt
 from bittensor.wallet import Keypair
 from bittensor.keyfiles import Keyfile
 
+from qbittensor.bt_compat import wallet_kwargs
+
 
 def load_fee_keypair_from_wallet(
     wallet_name: str,
@@ -62,7 +64,9 @@ def load_fee_keypair_from_wallet(
     import click
 
     try:
-        wallet = bt.Wallet(name=wallet_name, hotkey="default", path=wallet_path)
+        wallet = bt.Wallet(
+            **wallet_kwargs(name=wallet_name, hotkey="default", path=wallet_path)
+        )
         # Accessing .coldkey forces the keyfile to be loaded (prompts for password if encrypted)
         keypair: Keypair = wallet.coldkey
         return keypair
@@ -100,8 +104,8 @@ def load_fee_keypair_from_keyfile(
 
     try:
         keyfile = Keyfile(path=str(path))
-        # .keypair will prompt for password if the keyfile is encrypted
-        keypair: Keypair = keyfile.keypair
+        # get_keypair() will prompt for password if the keyfile is encrypted
+        keypair: Keypair = keyfile.get_keypair()
         return keypair
     except Exception as e:
         raise click.ClickException(

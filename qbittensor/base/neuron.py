@@ -25,7 +25,7 @@ from abc import ABC, abstractmethod
 
 # Sync calls set weights and also resyncs the metagraph.
 from qbittensor import bt_compat  # noqa: F401
-from qbittensor.bt_compat import MetagraphAdapter
+from qbittensor.bt_compat import MetagraphAdapter, wallet_kwargs
 from qbittensor.utils.config import check_config, add_args, config
 from qbittensor.utils.misc import ttl_get_block
 from qbittensor import __spec_version__ as spec_version
@@ -37,11 +37,8 @@ def _wallet_from_config(cfg):
     name = getattr(wallet_cfg, "name", "default") if wallet_cfg else "default"
     hotkey = getattr(wallet_cfg, "hotkey", "default") if wallet_cfg else "default"
     path = getattr(wallet_cfg, "path", None) if wallet_cfg else None
-    kwargs = {"name": name, "hotkey": hotkey}
-    if path:
-        kwargs["path"] = path
     # Use bt.Wallet so unit tests can patch qbittensor.base.neuron.bt.Wallet.
-    return bt.Wallet(**kwargs)
+    return bt.Wallet(**wallet_kwargs(name=name, hotkey=hotkey, path=path))
 
 
 def _network_from_config(cfg) -> str:
