@@ -141,25 +141,26 @@ class VaultChecker:
         args = parser.parse_args()
 
         ws_url = self.http_to_ws(args.rpc)
-        self.subtensor = bt.Subtensor(network=ws_url)
+        with bt.Subtensor(network=ws_url) as sub:
+            self.subtensor = sub
 
-        print(f"\n{'=' * 90}")
-        print(f"EVM Address : {args.address}")
+            print(f"\n{'=' * 90}")
+            print(f"EVM Address : {args.address}")
 
-        ss58 = self.get_ss58(args.address)
-        print(f"SS58 Address: {ss58}")
+            ss58 = self.get_ss58(args.address)
+            print(f"SS58 Address: {ss58}")
 
-        evm_bal = self.get_evm_balance(args.address, args.rpc)
-        sub_bal = self.get_substrate_balance(ss58)
+            evm_bal = self.get_evm_balance(args.address, args.rpc)
+            sub_bal = self.get_substrate_balance(ss58)
 
-        print(f"\nBalances:")
-        print(f"  EVM (TAO)      : {evm_bal:,.4f} τ")
-        print(f"  Substrate (TAO): {sub_bal:,.4f} τ")
+            print(f"\nBalances:")
+            print(f"  EVM (TAO)      : {evm_bal:,.4f} τ")
+            print(f"  Substrate (TAO): {sub_bal:,.4f} τ")
 
-        # Run the broad scan instead of the specific query
-        self.scan_all_stakes(ss58)
+            # Run the broad scan instead of the specific query
+            self.scan_all_stakes(ss58)
 
-        print(f"{'=' * 90}\n")
+            print(f"{'=' * 90}\n")
 
 
 if __name__ == "__main__":

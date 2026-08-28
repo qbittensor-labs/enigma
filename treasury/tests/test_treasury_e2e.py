@@ -963,39 +963,44 @@ class TreasuryTest:
         return f"Type: Unknown Payload\n      Selector: {actual_selector}\n      Raw: {raw_calldata[:60]}..."
 
     def run_all_tests(self):
-        self.load()
-        results = [
-            self.test_1_bootstrap(),
-            self.test_2_non_empty_whitelist(),
-            self.test_3_malicious_propose_transfer(),
-            self.test_4_malicious_vote_reverts(),
-            self.test_5_native_transfer_success(),
-            self.test_6_native_rate_limit_failure(),
-            self.test_7_native_insufficient_funds(),
-            self.test_8_alpha_transfer_success(),
-            self.test_9_alpha_rate_limit_failure(),
-            self.test_10_erc20_transfer_success(),
-            self.test_11_erc20_rate_limit_failure(),
-            self.test_12_pending_cancellation(),
-            self.test_13_queued_cancellation(),
-            self.test_14_against_vote_defeats_proposal(),
-            self.test_15_passive_quorum_failure(),
-            self.test_16_admin_move_stake(),
-            self.test_17_remove_from_whitelist(),
-            self.test_18_post_removal_voting_fails(),
-            self.test_19_proposal_listing(),
-        ]
+        try:
+            self.load()
+            results = [
+                self.test_1_bootstrap(),
+                self.test_2_non_empty_whitelist(),
+                self.test_3_malicious_propose_transfer(),
+                self.test_4_malicious_vote_reverts(),
+                self.test_5_native_transfer_success(),
+                self.test_6_native_rate_limit_failure(),
+                self.test_7_native_insufficient_funds(),
+                self.test_8_alpha_transfer_success(),
+                self.test_9_alpha_rate_limit_failure(),
+                self.test_10_erc20_transfer_success(),
+                self.test_11_erc20_rate_limit_failure(),
+                self.test_12_pending_cancellation(),
+                self.test_13_queued_cancellation(),
+                self.test_14_against_vote_defeats_proposal(),
+                self.test_15_passive_quorum_failure(),
+                self.test_16_admin_move_stake(),
+                self.test_17_remove_from_whitelist(),
+                self.test_18_post_removal_voting_fails(),
+                self.test_19_proposal_listing(),
+            ]
 
-        print("\n" + "=" * 90 + "\nFINAL SUMMARY\n" + "=" * 90)
-        for i, passed in enumerate(results, 1):
-            print(f"Test {i}: {'✅ PASS' if passed else '❌ FAIL'}")
+            print("\n" + "=" * 90 + "\nFINAL SUMMARY\n" + "=" * 90)
+            for i, passed in enumerate(results, 1):
+                print(f"Test {i}: {'✅ PASS' if passed else '❌ FAIL'}")
 
-        if all(results):
-            print("\n🎉 ALL TESTS PASSED STRICT ASSERTIONS!")
-            return 0
-        else:
-            print("\n❌ Tests failed strict revert checking. Review the outputs above.")
-            return 1
+            if all(results):
+                print("\n🎉 ALL TESTS PASSED STRICT ASSERTIONS!")
+                return 0
+            else:
+                print("\n❌ Tests failed strict revert checking. Review the outputs above.")
+                return 1
+        finally:
+            closer = getattr(self.subtensor, "close", None)
+            if callable(closer):
+                closer()
 
 
 if __name__ == "__main__":

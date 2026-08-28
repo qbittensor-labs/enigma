@@ -89,21 +89,27 @@ def _extrinsic_hash_from_block(subtensor: bt.Subtensor, block_hash: str, extrins
         raise ValueError(f"unrecognized extrinsic_id {extrinsic_id!r}") from e
 
     endpoint = getattr(subtensor, "endpoint", None) or "ws://127.0.0.1:9944"
-    substrate = getattr(subtensor, "substrate", None) or SubstrateInterface(url=endpoint)
-    block = substrate.get_block(block_hash=block_hash)
-    extrinsics = block.get("extrinsics") if isinstance(block, dict) else None
-    if not isinstance(extrinsics, list) or not (0 <= idx < len(extrinsics)):
-        raise ValueError(f"extrinsic index {idx} not in block {block_hash}")
-    ex = extrinsics[idx]
-    value = getattr(ex, "value", None) or {}
-    h = value.get("extrinsic_hash") if isinstance(value, dict) else None
-    if not h:
-        raw = getattr(ex, "extrinsic_hash", None)
-        if isinstance(raw, (bytes, bytearray)):
-            h = "0x" + raw.hex()
-    if not h:
-        raise ValueError(f"could not read extrinsic_hash for {extrinsic_id} in {block_hash}")
-    return str(h)
+    existing = getattr(subtensor, "substrate", None)
+    owned = existing is None
+    substrate = existing or SubstrateInterface(url=endpoint)
+    try:
+        block = substrate.get_block(block_hash=block_hash)
+        extrinsics = block.get("extrinsics") if isinstance(block, dict) else None
+        if not isinstance(extrinsics, list) or not (0 <= idx < len(extrinsics)):
+            raise ValueError(f"extrinsic index {idx} not in block {block_hash}")
+        ex = extrinsics[idx]
+        value = getattr(ex, "value", None) or {}
+        h = value.get("extrinsic_hash") if isinstance(value, dict) else None
+        if not h:
+            raw = getattr(ex, "extrinsic_hash", None)
+            if isinstance(raw, (bytes, bytearray)):
+                h = "0x" + raw.hex()
+        if not h:
+            raise ValueError(f"could not read extrinsic_hash for {extrinsic_id} in {block_hash}")
+        return str(h)
+    finally:
+        if owned:
+            substrate.close()
 
 
 def transfer_fee_extrinsic_subtensor(

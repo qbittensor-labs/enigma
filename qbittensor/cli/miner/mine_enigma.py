@@ -74,7 +74,7 @@ from qbittensor.cli.miner.tao_transfer import (
 from qbittensor.utils.time import timestamp
 from qbittensor.utils.transfer_proof import TRANSFER_DEST_SS58
 
-from qbittensor.cli.miner.utils.color import c
+from qbittensor.cli.miner.utils.color import c, validator_status_color
 
 try:
     import termios
@@ -250,6 +250,15 @@ def _format_api_datetime_display(raw: Any) -> str:
         return _parse_api_datetime(raw).strftime("%Y-%m-%d %H:%M:%S")
     except ValueError:
         return str(raw).replace("T", " ")
+
+
+def _short_ss58(value: str | None, head: int = 6, tail: int = 4) -> str:
+    """Truncate SS58 / extrinsic ids as first 6 ... last 4."""
+    if not value:
+        return "—"
+    if len(value) <= head + tail + 3:
+        return value
+    return f"{value[:head]}...{value[-tail:]}"
 
 
 def _milestone_status(milestone: dict[str, Any]) -> str:
@@ -1551,7 +1560,7 @@ def _submission_table(submissions: list[dict], selected: int) -> Table:
         marker = "▶" if i == sel else " "
         row_style: str | None = "reverse bold" if i == sel else None
 
-        tx_short = (sub.get("tx_hash") or "?")[:12] + "..."
+        tx_short = _short_ss58(sub.get("tx_hash"))
         ms_short = (sub.get("challenge_milestone_id") or "?")[:8] + "..."
         submitted = (
             sub["submitted_at"].strftime("%Y-%m-%d %H:%M")
@@ -1562,21 +1571,17 @@ def _submission_table(submissions: list[dict], selected: int) -> Table:
         status_lines = []
         validator_statuses = sub.get("validator_statuses") or {}
         has_failure = any(
-            str(info.get("status", "")).lower() not in ("success", "submitted", "offered", "pending", "running")
+            str(info.get("status", "")).lower()
+            not in ("success", "submitted", "pending", "running", "notrun")
             for info in validator_statuses.values()
         )
         for vhotkey, info in validator_statuses.items():
             status = info.get("status", "?")
             st_lower = str(status).lower()
-            if has_failure and st_lower in ("submitted", "offered", "pending", "running"):
+            if has_failure and st_lower in ("submitted", "pending", "running", "notrun"):
                 status_lines.append("[dim]—[/dim]")
                 continue
-            if st_lower in ("success", "submitted", "offered"):
-                color = c(2)
-            elif st_lower in ("pending", "running"):
-                color = c(3)  # neutral / in-progress
-            else:
-                color = c(1)
+            color = validator_status_color(status)
             status_lines.append(f"[{color}]{status}[/]")
 
         status_display = "  ".join(status_lines) if status_lines else "[dim]—[/dim]"
@@ -1628,7 +1633,8 @@ def _show_submission_details(console: Console, sub: dict[str, Any]) -> None:
         body.append("Validator Reports:\n", style="bold")
         # If any validator reported a failure, hide 'Submitted' for the others
         has_failure = any(
-            str(info.get("status", "")).lower() not in ("success", "submitted", "offered", "pending", "running")
+            str(info.get("status", "")).lower()
+            not in ("success", "submitted", "pending", "running", "notrun")
             for info in statuses.values()
         )
         for vhotkey, info in statuses.items():
@@ -1636,16 +1642,11 @@ def _show_submission_details(console: Console, sub: dict[str, Any]) -> None:
             st_lower = str(status).lower()
             ts = info.get("reported_at")
             ts_str = ts.strftime("%Y-%m-%d %H:%M") if ts else ""
-            body.append(f"  {vhotkey[:10]}...  ", style="dim")
-            if has_failure and st_lower in ("submitted", "offered", "pending", "running"):
+            body.append(f"  {_short_ss58(vhotkey)}  ", style="dim")
+            if has_failure and st_lower in ("submitted", "pending", "running", "notrun"):
                 body.append("[dim]—[/]", style="dim")
             else:
-                if st_lower in ("success", "submitted", "offered"):
-                    color = c(2)
-                elif st_lower in ("pending", "running"):
-                    color = c(3)  # neutral / in-progress
-                else:
-                    color = c(1)
+                color = validator_status_color(status)
                 body.append(f"[{color}]{status}[/]", style=color)
             if ts_str:
                 body.append(f"  ({ts_str})", style="dim")
@@ -1687,7 +1688,7 @@ def _list_my_submissions(console: Console, api_auth: CliApiAuth) -> None:
         Prompt.ask("Press Enter to return to menu", default="", show_default=False)
         return
 
-    hotkey_short = miner_hotkey[:8] + "..."
+    hotkey_short = _short_ss58(miner_hotkey)
     n = len(submissions)
     selected = 0
     pending_sub: dict | None = None

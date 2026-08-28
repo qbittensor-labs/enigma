@@ -20,7 +20,25 @@
 # Order matches semantic roles: pink, violet, cyan, muted, accent (table borders / lines).
 COLORS = ["5b8e7d", "bc4b51", "8cb369", "f4e285", "f4a259"]
 
+# Validator-report status colors (aligned with portal SubmissionCard).
+STATUS_BLUE = "60a5fa"  # NotRun / Submitted
+STATUS_GRAY = "64748b"  # Cancelled
+
 
 def c(index: int) -> str:
     """Rich hex color ``#rrggbb`` from ``COLORS`` (index wraps)."""
     return f"#{COLORS[index % len(COLORS)]}"
+
+
+def validator_status_color(status: str) -> str:
+    """Rich hex color for a validator-report status."""
+    lower = str(status).lower()
+    if lower in ("notrun", "submitted"):
+        return f"#{STATUS_BLUE}"
+    if lower == "cancelled":
+        return f"#{STATUS_GRAY}"
+    if lower == "success":
+        return c(2)
+    if lower in ("pending", "running"):
+        return c(3)
+    return c(1)
