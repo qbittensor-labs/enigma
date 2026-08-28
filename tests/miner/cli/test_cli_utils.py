@@ -18,9 +18,13 @@
 import pytest
 from unittest.mock import MagicMock, patch
 
-from qbittensor.cli.miner.utils.color import COLORS, c
+from qbittensor.cli.miner.utils.color import COLORS, STATUS_BLUE, STATUS_GRAY, c, validator_status_color
 from qbittensor.cli.miner.utils.constants import MINER_DB_TABLE_PREFIX
-from qbittensor.cli.miner.mine_enigma import _submission_table, _show_submission_details
+from qbittensor.cli.miner.mine_enigma import (
+    _short_ss58,
+    _submission_table,
+    _show_submission_details,
+)
 
 
 class TestColor:
@@ -30,6 +34,16 @@ class TestColor:
 
     def test_c_negative_index_wraps(self):
         assert c(-1) == f"#{COLORS[-1]}"
+
+    def test_validator_status_color(self):
+        assert validator_status_color("NotRun") == f"#{STATUS_BLUE}"
+        assert validator_status_color("Submitted") == f"#{STATUS_BLUE}"
+        assert validator_status_color("Cancelled") == f"#{STATUS_GRAY}"
+        assert validator_status_color("Success") == c(2)
+        assert validator_status_color("Pending") == c(3)
+        assert validator_status_color("Running") == c(3)
+        assert validator_status_color("Failure") == c(1)
+        assert validator_status_color("BuildFailure") == c(1)
 
 
 class TestConstants:
@@ -113,3 +127,33 @@ class TestSubmissionStatusDisplay:
     def test_empty_submissions_table(self):
         table = _submission_table([], 0)
         assert table is not None
+
+    def test_short_ss58_first_six_last_four(self):
+        hotkey = "5EZ52JMq4S7PYqzmLAggYahyDirMx3p1f1uBtLQgx6fk7kR8"
+        assert _short_ss58(hotkey) == "5EZ52J...7kR8"
+        assert _short_ss58(None) == "—"
+        assert _short_ss58("short") == "short"
+
+    def test_detail_view_shortens_validator_hotkey(self):
+        console = MagicMock()
+        hotkey = "5EZ52JMq4S7PYqzmLAggYahyDirMx3p1f1uBtLQgx6fk7kR8"
+        sub = self._mk_sub(validator_statuses={
+            hotkey: {
+                "status": "IncorrectFailure",
+                "updated_at": None,
+                "reported_at": None,
+            },
+        })
+        with patch("qbittensor.cli.miner.mine_enigma.Prompt"):
+            _show_submission_details(console, sub)
+        panel = console.print.call_args[0][0]
+        plain = panel.renderable.plain
+        assert "5EZ52J...7kR8" in plain
+        assert hotkey not in plain
+
+    def test_table_shortens_tx_hash(self):
+        tx = "0x" + ("ab" * 32)
+        table = _submission_table([self._mk_sub(tx=tx)], 0)
+        cells = table.columns[1]._cells
+        assert cells[0] == _short_ss58(tx)
+        assert tx not in cells[0]

@@ -192,6 +192,7 @@ def main():
 
     # Look up coldkey
     print(f"🔍 Looking up coldkey for hotkey: {solved_address}")
+    substrate = None
     try:
         substrate_url = args.rpc.replace("http://", "ws://").replace("https://", "wss://")
         substrate = SubstrateInterface(url=substrate_url)
@@ -203,6 +204,10 @@ def main():
     except Exception as e:
         print(f"❌ Error querying chain for coldkey: {e}")
         sys.exit(1)
+    finally:
+        # Websocket receive thread keeps the process alive unless we close it.
+        if substrate is not None:
+            substrate.close()
 
     # Convert vault_hotkey to hex if it is an SS58 address
     vault_hotkey_hex = args.vault_hotkey
