@@ -1,0 +1,147 @@
+schema_version: 1
+pack:
+  name: enigma-miner
+  display_name: Enigma Miner
+  subnet: enigma
+  netuid: 63
+  role: miner
+  description: >
+    SN 63 Enigma miner (neurons/miner.py). Serves SolutionSynapse to
+    trusted validators. Lightweight; no GPU or Docker required.
+    Interactive submissions use mine-enigma (NOT supervised by NeuronOps).
+
+git:
+  url: git@github.com:qbittensor-labs/enigma-staging.git
+  default_branch: main
+
+python:
+  requires: ">=3.12"
+  create_venv: true
+
+install_commands:
+  - ["{python}", "-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools"]
+  - ["{python}", "-m", "pip", "install", "-e", "{repo}"]
+
+upgrade_commands:
+  - ["git", "-C", "{repo}", "fetch", "--prune", "origin"]
+  - ["git", "-C", "{repo}", "pull", "--ff-only", "origin", "{branch}"]
+  - ["{python}", "-m", "pip", "install", "-e", "{repo}"]
+
+pre_stop_commands: []
+post_start_commands: []
+post_stop_commands: []
+
+entrypoint:
+  file: neurons/miner.py
+  extra_args: ["--logging.info"]
+
+version:
+  type: python_attr
+  module: qbittensor
+  attr: __version__
+
+arguments:
+  - name: netuid
+    flag: --netuid
+    required: true
+    type: int
+    default: 63
+    help: "Subnet netuid (Enigma production is 63)"
+  - name: wallet.name
+    flag: --wallet.name
+    required: true
+    type: str
+    default: default
+    help: "Bittensor wallet name (coldkey name). Private keys are not copied."
+  - name: wallet.hotkey
+    flag: --wallet.hotkey
+    required: true
+    type: str
+    default: default
+    help: "Hotkey name under the wallet."
+  - name: wallet.path
+    flag: --wallet.path
+    required: false
+    type: path
+    default: "~/.bittensor/wallets"
+    help: "Wallets directory."
+  - name: neuron.data_dir
+    flag: --neuron.data_dir
+    required: true
+    type: path
+    default: "/var/lib/neuron-ops/{name}/data"
+    help: "Sacred data directory. Never placed inside the git checkout. Maps to ENIGMA_DATA_DIR."
+  - name: axon.port
+    flag: --axon.port
+    required: true
+    type: int
+    default: 8092
+    help: "Must be unique on the host; validator often has 8091"
+  - name: axon.ip
+    flag: --axon.ip
+    required: false
+    type: str
+    default: "0.0.0.0"
+  - name: axon.external_ip
+    flag: --axon.external_ip
+    required: true
+    type: str
+    help: "Publishable IP for ServeAxon"
+  - name: subtensor.network
+    flag: --subtensor.network
+    required: false
+    type: str
+    default: finney
+  - name: treasury.trusted_hotkeys
+    flag: --treasury.trusted_hotkeys
+    required: false
+    type: str
+  - name: treasury.disable_whitelist_check
+    flag: --treasury.disable_whitelist_check
+    required: false
+    type: switch
+    default: false
+
+env:
+  - name: ENIGMA_DATA_DIR
+    required: false
+  - name: BT_WALLET_PASSWORD
+    required: false
+    secret: true
+    help: "Only if the hotkey is encrypted; unencrypted hotkeys are the expected prod path"
+
+health:
+  process_alive: true
+  tcp:
+    port_from: axon.port
+
+preflight:
+  - type: python_version
+    requires: ">=3.12"
+  - type: bin_exists
+    bin: git
+  - type: disk_free
+    path: "{data_dir}"
+    min_gb: 20
+  - type: port_free
+    from: axon.port
+
+update:
+  schedule: 1h
+  strategy: branch
+  auto_update: true
+  allow_dirty: false
+  upgrade_healthy_seconds: 60
+
+restart:
+  max_restarts: 5
+  window_seconds: 600
+  stop_timeout_seconds: 30
+  ready_grace_seconds: 120
+
+data:
+  sacred_paths: ["{data_dir}"]
+  default_data_dir: "/var/lib/neuron-ops/{name}/data"
+  pass_as:
+    flag: --neuron.data_dir
+    env: ENIGMA_DATA_DIR

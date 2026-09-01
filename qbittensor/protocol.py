@@ -42,6 +42,10 @@ class MinerSubmissionStatus(BaseModel):
         default=None,
         description="Challenge milestone this submission belongs to.",
     )
+    validation_id: Optional[str] = Field(
+        default=None,
+        description="Platform challenge_submission_validation row id for this run.",
+    )
 
 
 class SolutionSynapse(bt.Synapse):

@@ -114,6 +114,7 @@ def _report_pre_container_failure(
         reason=reason[:2000],
         log_data_key=log_data_key,
         failure_reason=failure_reason.value,
+        validation_id=execution.validation_id if execution is not None else None,
     )
 
 
@@ -127,6 +128,7 @@ def run_solution_management(
     miner_hotkey: str,
     submission_id: str | None,
     challenge_id: str,
+    validation_id: str | None,
     milestone_configuration: dict | None = None,
     platform_client: ChallengesClient | None = None,
     telemetry_service: TelemetryService | None = None,
@@ -153,6 +155,12 @@ def run_solution_management(
     execution: SolutionExecution | None = None
 
     bt.logging.info(f"🔧 run_solution_management starting for {challenge_validation_solution_id} (tx={tx_hash})")
+    if not validation_id:
+        bt.logging.error(
+            "❌ Refusing to execute: platform validation_id is missing. "
+            "Cannot report the correct challenge_submission_validation row."
+        )
+        return None, None, None
 
     if telemetry_service:
         telemetry_service.record_event(
@@ -177,6 +185,7 @@ def run_solution_management(
             miner_hotkey=miner_hotkey,
             challenge_id=challenge_id,
             max_solution_runtime_seconds=max_solution_runtime_seconds,
+            validation_id=validation_id,
         )
         if not solution_id:
             bt.logging.error("Failed to insert pending challenge solution.")
@@ -203,6 +212,7 @@ def run_solution_management(
             miner_hotkey=miner_hotkey,
             download_url=download_url,
             solution_id=solution_id,
+            validation_id=validation_id,
         )
 
         # Setup
@@ -427,6 +437,7 @@ def execute_verified_solution(
     tx_hash: str,
     miner_hotkey: str,
     challenge_id: str,
+    validation_id: str | None,
     # Optional: include these when the logs and solution output have been uploaded
     # so they can be reported together with the final status (as required by the platform).
     log_data_key: Optional[str] = None,
@@ -490,6 +501,7 @@ def execute_verified_solution(
                 status="Failure",
                 reason="Milestone is missing required max_solution_runtime configuration; validator cannot enforce timeout.",
                 failure_reason=ValidationFailureReason.UNKNOWN.value,
+                validation_id=validation_id,
             )
         else:
             bt.logging.warning("No platform_client provided — could not report failure for missing max_solution_runtime")
@@ -508,6 +520,7 @@ def execute_verified_solution(
             tx_hash=tx_hash,
             miner_hotkey=miner_hotkey,
             challenge_id=challenge_id,
+            validation_id=validation_id,
             milestone_configuration=milestone_configuration,
             platform_client=platform_client,
             telemetry_service=telemetry_service,
@@ -532,6 +545,7 @@ def execute_verified_solution(
                 log_data_key=log_data_key,
                 output_data_key=output_data_key,
                 failure_reason=ValidationFailureReason.INTERNAL_FAILURE.value,
+                validation_id=validation_id,
             )
         if telemetry_service:
             telemetry_service.record_event(

@@ -68,6 +68,7 @@ class ChallengeSubmissionResponse(BaseModel):
     challenge_milestone_id: str
     file_download_url: str
     tx_hash: str
+    validation_id: Optional[str] = None
 
 
 class ChallengeSubmissionVerifyUploadAddressResponse(BaseModel):
@@ -82,6 +83,7 @@ class ChallengeSubmissionRead(BaseModel):
     file_download_url: str
     upload_endpoint_id: str
     tx_hash: str
+    validation_id: Optional[str] = None
     address: str
     transfer_block_hash: str
     transfer_from_ss58: str

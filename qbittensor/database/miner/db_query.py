@@ -16,11 +16,8 @@
 # DEALINGS IN THE SOFTWARE.
 
 from datetime import datetime, timezone
-import uuid
 
 import bittensor as bt
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-
 from ..base_query import BaseDBQuery
 from .db_models import MinerSubmission, MinerSubmissionStatus
 
@@ -51,6 +48,7 @@ class DBQueryMiner(BaseDBQuery):
         transfer_from_ss58: str,
         transfer_to_ss58: str,
         transfer_amount_rao: str,
+        required_validation_runs: int = 3,
     ):
         """Insert or update a miner submission keyed by challenge milestone."""
         try:
@@ -69,6 +67,7 @@ class DBQueryMiner(BaseDBQuery):
                     existing_submission.transfer_from_ss58 = transfer_from_ss58
                     existing_submission.transfer_to_ss58 = transfer_to_ss58
                     existing_submission.transfer_amount_rao = transfer_amount_rao
+                    existing_submission.required_validation_runs = required_validation_runs
                     existing_submission.updated_at = datetime.now(timezone.utc)
                     bt.logging.info(f" ✅ Updated existing miner submission for tx_hash: {tx_hash}")
                     return True
@@ -84,6 +83,7 @@ class DBQueryMiner(BaseDBQuery):
                         transfer_from_ss58=transfer_from_ss58,
                         transfer_to_ss58=transfer_to_ss58,
                         transfer_amount_rao=transfer_amount_rao,
+                        required_validation_runs=required_validation_runs,
                     )
                     session.add(new_submission)
                     bt.logging.info(f" ✅ Inserted new miner submission for tx_hash: {tx_hash}")
@@ -124,7 +124,14 @@ class DBQueryMiner(BaseDBQuery):
             bt.logging.error(f"Error getting next miner submission: {e}")
             return None
 
-    def insert_miner_submission_status(self, challenge_milestone_id: str, solution_status: str, validator_hotkey: str, tx_hash: str) -> bool:
+    def insert_miner_submission_status(
+        self,
+        challenge_milestone_id: str,
+        solution_status: str,
+        validator_hotkey: str,
+        tx_hash: str,
+        validation_id: str | None = None,
+    ) -> bool:
         """
         Upsert a miner submission status record.
 
@@ -154,25 +161,57 @@ class DBQueryMiner(BaseDBQuery):
                     return False
 
                 now = datetime.now(timezone.utc)
-                stmt = sqlite_insert(MinerSubmissionStatus).values(
-                    id=str(uuid.uuid4()),
-                    challenge_milestone_id=challenge_milestone_id,
-                    solution_status=solution_status,
-                    validator_hotkey=validator_hotkey,
-                    tx_hash=tx_hash,
-                    created_at=now,
-                    updated_at=now,
-                )
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=["validator_hotkey", "tx_hash", "challenge_milestone_id"],
-                    set_={
-                        "solution_status": solution_status,
-                        "updated_at": now,
-                    },
-                )
-                session.execute(stmt)
+                if validation_id:
+                    existing = (
+                        session.query(MinerSubmissionStatus)
+                        .filter_by(validation_id=validation_id)
+                        .first()
+                    )
+                    if existing:
+                        existing.solution_status = solution_status
+                        existing.validator_hotkey = validator_hotkey
+                        existing.updated_at = now
+                    else:
+                        session.add(
+                            MinerSubmissionStatus(
+                                challenge_milestone_id=challenge_milestone_id,
+                                solution_status=solution_status,
+                                validator_hotkey=validator_hotkey,
+                                tx_hash=tx_hash,
+                                validation_id=validation_id,
+                                created_at=now,
+                                updated_at=now,
+                            )
+                        )
+                else:
+                    existing = (
+                        session.query(MinerSubmissionStatus)
+                        .filter_by(
+                            validator_hotkey=validator_hotkey,
+                            tx_hash=tx_hash,
+                            challenge_milestone_id=challenge_milestone_id,
+                            validation_id=None,
+                        )
+                        .first()
+                    )
+                    if existing:
+                        existing.solution_status = solution_status
+                        existing.updated_at = now
+                    else:
+                        session.add(
+                            MinerSubmissionStatus(
+                                challenge_milestone_id=challenge_milestone_id,
+                                solution_status=solution_status,
+                                validator_hotkey=validator_hotkey,
+                                tx_hash=tx_hash,
+                                validation_id=None,
+                                created_at=now,
+                                updated_at=now,
+                            )
+                        )
                 bt.logging.info(
-                    f"✅ Upserted miner submission status '{solution_status}' for tx_hash: {tx_hash}"
+                    f"✅ Upserted miner submission status '{solution_status}' for tx_hash: {tx_hash} "
+                    f"validation_id={validation_id}"
                 )
                 return True
         except Exception as e:
@@ -195,20 +234,29 @@ class DBQueryMiner(BaseDBQuery):
         """
         try:
             with self._managed_session() as session:
+                existing = (
+                    session.query(MinerSubmissionStatus)
+                    .filter_by(
+                        validator_hotkey=validator_hotkey,
+                        tx_hash=tx_hash,
+                        challenge_milestone_id=challenge_milestone_id,
+                    )
+                    .first()
+                )
+                if existing:
+                    return True
                 now = datetime.now(timezone.utc)
-                stmt = sqlite_insert(MinerSubmissionStatus).values(
-                    id=str(uuid.uuid4()),
-                    challenge_milestone_id=challenge_milestone_id,
-                    solution_status=MINER_SUBMISSION_STATUS_SUBMITTED,
-                    validator_hotkey=validator_hotkey,
-                    tx_hash=tx_hash,
-                    created_at=now,
-                    updated_at=now,
+                session.add(
+                    MinerSubmissionStatus(
+                        challenge_milestone_id=challenge_milestone_id,
+                        solution_status=MINER_SUBMISSION_STATUS_SUBMITTED,
+                        validator_hotkey=validator_hotkey,
+                        tx_hash=tx_hash,
+                        validation_id=None,
+                        created_at=now,
+                        updated_at=now,
+                    )
                 )
-                stmt = stmt.on_conflict_do_nothing(
-                    index_elements=["validator_hotkey", "tx_hash", "challenge_milestone_id"]
-                )
-                session.execute(stmt)
                 return True
         except Exception as e:
             bt.logging.error(f"❌ Error recording first Submitted for {tx_hash}: {e}")
@@ -277,13 +325,16 @@ class DBQueryMiner(BaseDBQuery):
                         .all()
                     )
 
-                    status_summary = {}
+                    runs = []
                     for st in statuses:
-                        if st.validator_hotkey not in status_summary:
-                            status_summary[st.validator_hotkey] = {
-                                "status": st.solution_status,
-                                "updated_at": st.updated_at,
-                            }
+                        if not st.validation_id and st.solution_status == MINER_SUBMISSION_STATUS_SUBMITTED:
+                            continue
+                        runs.append({
+                            "validation_id": st.validation_id,
+                            "validator_hotkey": st.validator_hotkey,
+                            "status": st.solution_status,
+                            "updated_at": st.updated_at,
+                        })
 
                     results.append({
                         "tx_hash": sub.tx_hash,
@@ -291,7 +342,8 @@ class DBQueryMiner(BaseDBQuery):
                         "upload_id": sub.upload_id,
                         "created_at": sub.created_at,
                         "submitted_at": sub.submitted_at,
-                        "validator_statuses": status_summary,
+                        "required_validation_runs": getattr(sub, "required_validation_runs", 3) or 3,
+                        "runs": runs,
                     })
 
                 return results

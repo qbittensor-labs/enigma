@@ -72,6 +72,10 @@ class SolutionPostProcessInfo:
     def challenge_id(self) -> str:
         return self.execution.challenge_id
 
+    @property
+    def validation_id(self) -> str:
+        return self.execution.validation_id
+
 
 @dataclass(frozen=True)
 class SolutionExecution:
@@ -92,6 +96,7 @@ class SolutionExecution:
     challenge_milestone_id: str
     miner_hotkey: str
     download_url: str
+    validation_id: str = ""
 
     @classmethod
     def create(
@@ -104,6 +109,7 @@ class SolutionExecution:
         miner_hotkey: str,
         download_url: str,
         solution_id: str,
+        validation_id: str = "",
     ) -> "SolutionExecution":
         """Constructor for the full set of required fields."""
         return cls(
@@ -115,6 +121,7 @@ class SolutionExecution:
             miner_hotkey=miner_hotkey,
             download_url=download_url,
             solution_id=solution_id,
+            validation_id=validation_id,
         )
 
     def ensure_solution_id(self) -> str:
@@ -130,6 +137,7 @@ class SolutionExecution:
             "tx_hash": self.tx_hash,
             "challenge_validation_solution_id": self.challenge_validation_solution_id,
             "solution_id": self.solution_id,
+            "validation_id": self.validation_id,
         }
 
     def __repr__(self) -> str:

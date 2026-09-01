@@ -39,6 +39,7 @@ def _insert_solution(query, **overrides):
         tx_hash="0xabc",
         miner_hotkey="5Miner",
         cleaned=False,
+        validation_id="csv-1",
     )
     defaults.update(overrides)
     # insert now returns the solution id (str) on success (preferred stable key)
@@ -95,6 +96,7 @@ class TestDBQuery:
             tx_hash="0xearly",
             miner_hotkey="5Miner",
             challenge_id="ch-1",
+            validation_id="csv-early",
         )
         assert created_id
         row = validator_query.get_challenge_solution_by_id(created_id)
@@ -125,6 +127,7 @@ class TestDBQuery:
             tx_hash="0xcross",
             miner_hotkey="5Miner",
             challenge_id=None,
+            validation_id="csv-cross",
         )
         assert created_id
         row = validator_query.get_challenge_solution_by_id(created_id)
@@ -167,6 +170,7 @@ class TestDBQuery:
             tx_hash=tx,
             miner_hotkey="5Miner",
             challenge_id="ch-1",
+            validation_id="csv-reuse",
         )
         assert first_id
 
@@ -183,6 +187,7 @@ class TestDBQuery:
             tx_hash=tx,
             miner_hotkey="5Miner",
             challenge_id="ch-1",
+            validation_id="csv-reuse",
         )
         assert same_id
         assert same_id == first_id  # same row (upsert)
@@ -197,6 +202,7 @@ class TestDBQuery:
             tx_hash=tx,
             miner_hotkey="5Miner",
             challenge_id="ch-1",
+            validation_id="csv-reuse",
         )
         assert cross_id
         assert cross_id == first_id
@@ -210,6 +216,7 @@ class TestDBQuery:
             tx_hash=tx,
             miner_hotkey="5Miner",
             challenge_id="ch-1",
+            validation_id="csv-reuse",
         )
         assert bad_file is None
 
@@ -222,6 +229,7 @@ class TestDBQuery:
             tx_hash=tx,
             miner_hotkey="5Miner",
             challenge_id="ch-1",
+            validation_id="csv-reuse",
         )
         assert bad_mil is None
 

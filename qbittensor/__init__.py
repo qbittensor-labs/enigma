@@ -20,7 +20,7 @@
 from qbittensor import bt_compat as _bt_compat  # noqa: F401
 
 # Define the version of the template module.
-__version__ = "2.0.2"
+__version__ = "2.1.0"
 version_split = __version__.split(".")
 major = int(version_split[0]) if len(version_split) > 0 else 0
 minor = int(version_split[1]) if len(version_split) > 1 else 0

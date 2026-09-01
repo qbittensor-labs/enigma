@@ -39,6 +39,7 @@ from qbittensor.cli.miner.mine_enigma import (
     _get_miner_hotkey_ss58,
     _load_signing_keypair,
     _resolve_cli_api_auth,
+    resolve_miner_list_db,
 )
 
 
@@ -86,6 +87,7 @@ def test_resolve_cli_api_auth_defaults(clean_wallet_env):
     assert auth.wallet_path is None
     assert auth.network == "finney"
     assert auth.netuid == 63
+    assert auth.wallet_cli_specified is False
 
 
 def test_resolve_cli_api_auth_reads_wallet_path_env(clean_wallet_env, monkeypatch):
@@ -106,6 +108,7 @@ def test_resolve_cli_api_auth_cli_overrides_env(clean_wallet_env, monkeypatch):
     assert auth.wallet_name == "cli-name"
     assert auth.wallet_hotkey == "cli-hot"
     assert auth.wallet_path == "/from-cli"
+    assert auth.wallet_cli_specified is True
 
 
 def test_resolve_cli_api_auth_blank_wallet_path_becomes_none(clean_wallet_env, monkeypatch):
@@ -231,6 +234,45 @@ def test_load_fee_keypair_from_real_keyfile(temp_wallet):
     coldkey_path = Path(temp_wallet.path) / "miner" / "coldkey"
     keypair = load_fee_keypair_from_keyfile(coldkey_path)
     assert keypair.ss58_address == temp_wallet.coldkey.ss58_address
+
+
+def test_resolve_miner_list_db_uses_first_existing_without_wallet(
+    tmp_data_dir, clean_wallet_env
+):
+    (tmp_data_dir / "miner_submissions_ccccc.db").write_bytes(b"")
+    (tmp_data_dir / "miner_submissions_aaaaa.db").write_bytes(b"")
+    auth = _resolve_cli_api_auth(None, None)
+    hotkey, db_name = resolve_miner_list_db(auth, data_dir=str(tmp_data_dir))
+    assert db_name == "miner_submissions_aaaaa.db"
+    assert hotkey == "aaaaa"
+
+
+def test_resolve_miner_list_db_explicit_db_flag(tmp_data_dir, clean_wallet_env):
+    auth = _resolve_cli_api_auth(None, None)
+    hotkey, db_name = resolve_miner_list_db(
+        auth, db_name="miner_submissions_5GdjR", data_dir=str(tmp_data_dir)
+    )
+    assert db_name == "miner_submissions_5GdjR"
+    assert hotkey == "5GdjR"
+
+
+def test_resolve_miner_list_db_wallet_cli_uses_hotkey(
+    temp_wallet, tmp_data_dir, clean_wallet_env
+):
+    auth = _resolve_cli_api_auth(
+        "miner", "hk1", wallet_path=str(temp_wallet.path)
+    )
+    hotkey, db_name = resolve_miner_list_db(auth, data_dir=str(tmp_data_dir))
+    assert db_name is None
+    assert hotkey == temp_wallet.hotkey.ss58_address
+
+
+def test_resolve_miner_list_db_no_files_without_wallet_raises(
+    tmp_data_dir, clean_wallet_env
+):
+    auth = _resolve_cli_api_auth(None, None)
+    with pytest.raises(click.ClickException, match="No miner_submissions"):
+        resolve_miner_list_db(auth, data_dir=str(tmp_data_dir))
 
 
 def test_load_validator_keypair_omitted_path_does_not_raise_nonetype_pathlike():

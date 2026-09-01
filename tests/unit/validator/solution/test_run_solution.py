@@ -700,6 +700,7 @@ class TestRunSolutionManagement:
                 miner_hotkey="miner_hk",
                 submission_id="sub-id",
                 challenge_id="challenge-id",
+                validation_id="csv-test",
             )
 
         assert image == "tag_image"
@@ -727,6 +728,7 @@ class TestRunSolutionManagement:
             miner_hotkey="hk",
             submission_id="sub",
             challenge_id="challenge-id",
+            validation_id="csv-test",
         )
         assert result == (None, None, None)
         mock_cleanup.assert_called_once()
@@ -752,6 +754,7 @@ class TestRunSolutionManagement:
             miner_hotkey="hk",
             submission_id="sub",
             challenge_id="challenge-id",
+            validation_id="csv-test",
             platform_client=platform_client,
         )
         assert result == (None, None, None)
@@ -789,6 +792,7 @@ class TestRunSolutionManagement:
             miner_hotkey="hk",
             submission_id="sub",
             challenge_id="challenge-id",
+            validation_id="csv-test",
             platform_client=platform_client,
         )
         assert result == (None, None, None)
@@ -834,6 +838,7 @@ class TestRunSolutionManagement:
             miner_hotkey="hk",
             submission_id="sub-hqp",
             challenge_id="challenge-id",
+            validation_id="csv-test",
             platform_client=platform_client,
         )
         assert result == (None, None, None)
@@ -873,6 +878,7 @@ class TestRunSolutionManagement:
                 miner_hotkey="hk",
                 submission_id="sub",
                 challenge_id="challenge-id",
+                validation_id="csv-test",
                 platform_client=platform_client,
             )
         assert result == (None, None, None)
@@ -906,6 +912,7 @@ class TestRunSolutionManagement:
             miner_hotkey="hk",
             submission_id="sub",
             challenge_id="challenge-id",
+            validation_id="csv-test",
             platform_client=platform_client,
         )
         assert result == (None, None, None)
@@ -940,6 +947,7 @@ class TestRunSolutionManagement:
             miner_hotkey="hk",
             submission_id="sub",
             challenge_id="challenge-id",
+            validation_id="csv-test",
             platform_client=platform_client,
         )
         assert result == (None, None, None)
@@ -970,6 +978,7 @@ def test_run_solution_management_create_fails_reports_internal_failure():
         miner_hotkey="hk",
         submission_id="sub",
         challenge_id="challenge-id",
+        validation_id="csv-test",
         platform_client=platform_client,
     )
     assert result == (None, None, None)
@@ -999,6 +1008,7 @@ def test_execute_verified_solution_reports_unknown_on_missing_runtime(_run_mgmt,
         tx_hash="txh",
         miner_hotkey="hk",
         challenge_id="ch-id",
+        validation_id="csv-test",
     )
     assert res == (None, None, None)
     platform.report_submission_status.assert_called()

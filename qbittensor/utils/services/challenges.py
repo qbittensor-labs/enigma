@@ -252,6 +252,22 @@ class ChallengesClient:
             f"milestone_id {milestone_id} not found under challenge {challenge_id}"
         )
 
+    def get_required_validation_runs(self, challenge_id: str, milestone_id: str) -> int:
+        challenge = self.get_challenge(challenge_id)
+        for ms in challenge.get("milestones", []):
+            if str(ms.get("id")) == str(milestone_id):
+                raw = ms.get("required_validation_runs")
+                if raw is None:
+                    return 3
+                try:
+                    n = int(raw)
+                    return n if n >= 1 else 3
+                except (TypeError, ValueError):
+                    return 3
+        raise RuntimeError(
+            f"milestone_id {milestone_id} not found under challenge {challenge_id}"
+        )
+
     def get_milestone_max_solution_runtime(
         self,
         challenge_id: str,
@@ -346,6 +362,7 @@ class ChallengesClient:
         log_data_key: Optional[str] = None,
         output_data_key: Optional[str] = None,
         failure_reason: Optional[str] = None,
+        validation_id: Optional[str] = None,
     ) -> bool:
         if not self.request_manager:
             raise RuntimeError("report_submission_status requires an authenticated ChallengesClient")
@@ -359,6 +376,8 @@ class ChallengesClient:
             payload["output_data_key"] = output_data_key
         if failure_reason:
             payload["failure_reason"] = failure_reason
+        if validation_id:
+            payload["validation_id"] = validation_id
 
         try:
             resp = self._request(

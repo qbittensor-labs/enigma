@@ -382,6 +382,7 @@ class ResponseProcessor:
                                 submission_id=submission_id,
                                 status="NotRun",
                                 reason="Validator was at capacity (busy=true) when this claim was processed; execution skipped. Reset to NotRun so platform can re-offer via /submissions/next to an idle validator.",
+                                validation_id=getattr(response, "validation_id", None),
                             )
                     continue
 
@@ -398,6 +399,14 @@ class ResponseProcessor:
                     from contextlib import nullcontext
                     launch_ctx = nullcontext()
 
+                validation_id = getattr(response, "validation_id", None)
+                if not validation_id:
+                    bt.logging.error(
+                        f"❌ Platform create/claim for tx={synapse.tx_hash} did not return validation_id. "
+                        "Refusing to execute so we cannot report the wrong row."
+                    )
+                    continue
+
                 with launch_ctx:
                     image_name, container_id, folder_name = execute_verified_solution(
                         db_conn=self.database_connection,
@@ -411,6 +420,7 @@ class ResponseProcessor:
                         tx_hash=synapse.tx_hash,
                         miner_hotkey=miner_hotkey,
                         telemetry_service=self.telemetry_service,
+                        validation_id=validation_id,
                     )
 
                 bt.logging.info(f"Started solution with image name {image_name} and container id {container_id}. Solution files are located in {folder_name}")

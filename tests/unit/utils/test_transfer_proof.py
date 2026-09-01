@@ -235,3 +235,72 @@ class TestBatchFeeVerification:
 
         assert ok is False
         assert "version" in err.lower() or "remark" in err.lower()
+
+    def test_chain_get_block_fallback_when_state_discarded(self):
+        """Lite/localnet nodes prune state; fee extrinsic is still in the block body."""
+        from unittest.mock import patch
+
+        substrate = MagicMock()
+        substrate.ss58_encode.side_effect = lambda x: (
+            "5Coldkey" if isinstance(x, (bytes, bytearray)) else str(x)
+        )
+        substrate.retrieve_extrinsic_by_hash.side_effect = Exception(
+            "State discarded for 0xabc. This indicates the block is too old"
+        )
+        substrate.get_block.side_effect = Exception("State discarded")
+
+        remark_data = (
+            f"{FEE_BINDING_REMARK_VERSION}\nminer_hotkey:5Hot\nmilestone_id:m1\n"
+            f"upload_endpoint_id:u1\namount_rao:12345"
+        ).encode()
+        decoded = MagicMock()
+        decoded.value = {
+            "address": "5Coldkey",
+            "extrinsic_hash": "0xtx",
+            "call": {
+                "call_module": "Utility",
+                "call_function": "batch_all",
+                "call_args": [
+                    {
+                        "name": "calls",
+                        "value": [
+                            make_mock_call(
+                                "Balances",
+                                "transfer_keep_alive",
+                                {
+                                    "dest": "5D82xX2p14X7gCGKu2Hpf8feNAzeXefgoeh4UJgVRpVTbVP4",
+                                    "value": 12345,
+                                },
+                            ),
+                            make_mock_call(
+                                "System", "remark_with_event", {"remark": remark_data}
+                            ),
+                        ],
+                    }
+                ],
+            },
+        }
+        substrate.rpc_request.return_value = {
+            "result": {"block": {"extrinsics": ["0xaaaa"]}}
+        }
+        substrate.decode_scale.return_value = decoded
+
+        with patch(
+            "qbittensor.utils.transfer_proof._get_archive_substrate", return_value=None
+        ), patch(
+            "qbittensor.utils.transfer_proof._fetch_extrinsic_details_via_subscan",
+            return_value=None,
+        ):
+            ok, err = _verify_batch_fee_payment_on_chain(
+                substrate=substrate,
+                block_hash="0xblock",
+                extrinsic_hash="0xtx",
+                expected_signer_ss58="5Coldkey",
+                expected_dest_ss58="5D82xX2p14X7gCGKu2Hpf8feNAzeXefgoeh4UJgVRpVTbVP4",
+                expected_value_rao=12345,
+            )
+
+        assert ok is True, f"Expected success via chain_getBlock fallback but got: {err}"
+        assert err == ""
+        substrate.rpc_request.assert_called()
+        substrate.decode_scale.assert_called()

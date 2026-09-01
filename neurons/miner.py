@@ -100,6 +100,7 @@ class Miner(BaseMinerNeuron):
                     solution_status=submission_status.status,
                     validator_hotkey=validator_hotkey,
                     tx_hash=submission_status.tx_hash,
+                    validation_id=getattr(submission_status, "validation_id", None),
                 )
 
         if synapse.validator_busy:

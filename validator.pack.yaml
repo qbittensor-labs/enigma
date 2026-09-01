@@ -1,0 +1,204 @@
+schema_version: 1
+pack:
+  name: enigma-validator
+  display_name: Enigma Validator
+  subnet: enigma
+  netuid: 63
+  role: validator
+  description: >
+    Bittensor SN 63 Enigma validator (neurons/validator.py).
+    Queries miners, verifies TAO transfer proofs, runs submitted
+    solutions in Docker, reports to the Challenges API.
+    Host Docker+BuildKit and NVIDIA Container Toolkit are required.
+    NeuronOps will not manage those Docker containers.
+
+git:
+  url: git@github.com:qbittensor-labs/enigma-staging.git
+  default_branch: main
+
+python:
+  requires: ">=3.12"
+  create_venv: true
+
+install_commands:
+  - ["{python}", "-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools"]
+  - ["{python}", "-m", "pip", "install", "-e", "{repo}"]
+
+upgrade_commands:
+  - ["git", "-C", "{repo}", "fetch", "--prune", "origin"]
+  - ["git", "-C", "{repo}", "pull", "--ff-only", "origin", "{branch}"]
+  - ["{python}", "-m", "pip", "install", "-e", "{repo}"]
+
+pre_stop_commands: []
+post_start_commands: []
+post_stop_commands: []
+
+entrypoint:
+  file: neurons/validator.py
+  extra_args:
+    - --logging.info
+
+version:
+  type: python_attr
+  module: qbittensor
+  attr: __version__
+
+arguments:
+  - name: netuid
+    flag: --netuid
+    required: true
+    type: int
+    default: 63
+    help: "Subnet netuid (Enigma production is 63)"
+
+  - name: wallet.name
+    flag: --wallet.name
+    required: true
+    type: str
+    default: default
+    help: "Bittensor wallet name (coldkey name). Private keys are not copied."
+
+  - name: wallet.hotkey
+    flag: --wallet.hotkey
+    required: true
+    type: str
+    default: default
+    help: "Hotkey name under the wallet."
+
+  - name: wallet.path
+    flag: --wallet.path
+    required: false
+    type: path
+    default: "~/.bittensor/wallets"
+    help: "Wallets directory."
+
+  - name: neuron.device
+    flag: --neuron.device
+    required: true
+    type: str
+    default: cuda
+    help: "Device (cuda, cuda:0, cpu). Enigma validator expects an NVIDIA GPU."
+
+  - name: neuron.data_dir
+    flag: --neuron.data_dir
+    required: true
+    type: path
+    default: "/var/lib/neuron-ops/{name}/data"
+    help: >
+      Sacred data directory (SQLite DBs + solution workspaces).
+      Never placed inside the git checkout. Maps to ENIGMA_DATA_DIR.
+
+  - name: axon.port
+    flag: --axon.port
+    required: false
+    type: int
+    default: 8091
+    help: "Axon listen port."
+
+  - name: axon.ip
+    flag: --axon.ip
+    required: false
+    type: str
+    default: "0.0.0.0"
+
+  - name: axon.external_ip
+    flag: --axon.external_ip
+    required: false
+    type: str
+    help: "Publishable IP for on-chain axon. Required behind NAT."
+
+  - name: axon.external_port
+    flag: --axon.external_port
+    required: false
+    type: int
+
+  - name: subtensor.network
+    flag: --subtensor.network
+    required: false
+    type: str
+    default: finney
+    help: "finney | test | local | ws(s):// endpoint"
+
+  - name: subtensor.chain_endpoint
+    flag: --subtensor.chain_endpoint
+    required: false
+    type: str
+
+  - name: neuron.epoch_length
+    flag: --neuron.epoch_length
+    required: false
+    type: int
+    default: 100
+
+env:
+  - name: ENIGMA_DATA_DIR
+    required: false
+    help: "Set automatically from --neuron.data_dir if omitted."
+  - name: CHALLENGES_API_URL
+    required: false
+    default: https://challenges.qbittensorlabs.com
+  - name: TENSORAUTH_URL
+    required: false
+    default: https://tensorauth.qbittensorlabs.com
+  - name: TELEMETRY_API_URL
+    required: false
+    default: https://telemetry.qbittensorlabs.com
+  - name: NVIDIA_VISIBLE_DEVICES
+    required: false
+    help: "Optional GPU pin for Docker child containers the validator launches. Warn on overlap with another instance."
+  - name: BT_WALLET_PASSWORD
+    required: false
+    secret: true
+    help: "Only if the hotkey is encrypted. Unencrypted hotkeys are the expected production path. Written to instances/<name>/env chmod 600, never logs/API."
+
+health:
+  process_alive: true
+  tcp:
+    port_from: axon.port
+
+preflight:
+  - type: python_version
+    requires: ">=3.12"
+  - type: bin_exists
+    bin: git
+  - type: bin_exists
+    bin: docker
+  - type: command
+    argv: ["docker", "buildx", "version"]
+    help: "Enigma requires Docker Engine with BuildKit/buildx (legacy builder unsupported)."
+  - type: command
+    argv: ["nvidia-smi"]
+    help: "NVIDIA driver. See qbittensor/validator/utils/gpu_verification/GPU_README.md"
+  - type: disk_free
+    path: "{data_dir}"
+    min_gb: 50
+  - type: dir_writable
+    path: "{data_dir}"
+  - type: user_in_group
+    group: docker
+    help: "Validator process must talk to the Docker socket."
+  - type: port_free
+    from: axon.port
+  - type: gpu_not_overlapping
+    from: neuron.device
+
+update:
+  schedule: 1h
+  strategy: branch
+  auto_update: true
+  allow_dirty: false
+  upgrade_healthy_seconds: 600  # ≥ GPU __init__; runtime also uses max(this, ready_grace_seconds)
+
+restart:
+  max_restarts: 5
+  window_seconds: 600
+  stop_timeout_seconds: 120   # Python process exit only. Does NOT drain 4h solution containers.
+  ready_grace_seconds: 600    # GPU smoke-test image build in __init__ can exceed 5 min.
+
+data:
+  sacred_paths:
+    - "{data_dir}"
+  default_data_dir: "/var/lib/neuron-ops/{name}/data"
+  pass_as:
+    flag: --neuron.data_dir
+    env: ENIGMA_DATA_DIR

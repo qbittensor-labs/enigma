@@ -179,6 +179,7 @@ class SolutionCrossChecker:
                         status="Failure",
                         reason=proof_err or "Transfer proof verification failed for cross-check submission",
                         failure_reason=ValidationFailureReason.UNKNOWN.value,
+                        validation_id=submission.validation_id,
                     )
                     return
                 else:
@@ -194,6 +195,7 @@ class SolutionCrossChecker:
                 status="Failure",
                 reason=proof_err or "Transfer proof verification failed for cross-check submission (cached result)",
                 failure_reason=ValidationFailureReason.UNKNOWN.value,
+                validation_id=submission.validation_id,
             )
             return
 
@@ -217,6 +219,7 @@ class SolutionCrossChecker:
                 status="Failure",
                 reason="Missing challenge_id for cross-check submission",
                 failure_reason=ValidationFailureReason.UNKNOWN.value,
+                validation_id=submission.validation_id,
             )
             return
 
@@ -231,6 +234,19 @@ class SolutionCrossChecker:
                 # as challenge_validation_solution_id so that the DB guard can recognize it as
                 # the same work item (tx + file upload + challenge + milestone) even if the
                 # cross-check submission uses a different .id .
+                if not submission.validation_id:
+                    bt.logging.error(
+                        f"❌ Cross-check submission {submission.id} missing validation_id. "
+                        "Refusing to execute."
+                    )
+                    self.platform_client.report_submission_status(
+                        submission_id=submission.id,
+                        status="Failure",
+                        reason="Missing validation_id for cross-check submission",
+                        failure_reason=ValidationFailureReason.UNKNOWN.value,
+                    )
+                    return
+
                 image_name, container_id, folder_name = execute_verified_solution(
                     db_conn=self.database_connection,
                     platform_client=self.platform_client,
@@ -243,6 +259,7 @@ class SolutionCrossChecker:
                     tx_hash=submission.tx_hash,
                     miner_hotkey=submission.address,
                     telemetry_service=self.telemetry_service,
+                    validation_id=submission.validation_id,
                 )
         except Exception as e:
             # Last-resort: never let a cross-check exception leave the platform
@@ -257,6 +274,7 @@ class SolutionCrossChecker:
                 status="Failure",
                 reason=f"Internal failure during cross-check execution: {type(e).__name__}: {e}"[:2000],
                 failure_reason=ValidationFailureReason.INTERNAL_FAILURE.value,
+                validation_id=submission.validation_id,
             )
             return
 
