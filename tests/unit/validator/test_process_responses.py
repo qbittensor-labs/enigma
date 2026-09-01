@@ -85,6 +85,7 @@ class TestResponseProcessor:
             challenge_milestone_id="m1",
             file_download_url="https://example.com/solution.zip",
             tx_hash="0xabc",
+            validation_id="csv-1",
         )
         processor.platform_client.submit_solution.return_value = response
 
@@ -162,6 +163,7 @@ class TestResponseProcessorAdditionalPaths:
             challenge_milestone_id="m1",
             file_download_url="https://example.com/solution.zip",
             tx_hash="0xabc",
+            validation_id="csv-1",
         )
         processor.platform_client.submit_solution.return_value = response
         mock_execute.return_value = ("img", "cid", "/tmp/folder")

@@ -73,6 +73,7 @@ class TestSolutionCrossChecker:
             transfer_amount_rao="1000000000",
             transfer_proof_message="msg",
             transfer_proof_signature_hex="sig",
+            validation_id="csv-1",
         )
         cross_checker.platform_client.get_next_cross_check_submission.return_value = submission
 
@@ -101,6 +102,7 @@ class TestSolutionCrossChecker:
             transfer_amount_rao="1000000000",
             transfer_proof_message="msg",
             transfer_proof_signature_hex="sig",
+            validation_id="csv-1",
         )
         cross_checker.platform_client.get_next_cross_check_submission.return_value = submission
 
@@ -112,6 +114,7 @@ class TestSolutionCrossChecker:
             status="Failure",
             reason="Missing challenge_id for cross-check submission",
             failure_reason="Unknown",
+            validation_id="csv-1",
         )
         # No execute call
         # (mock not set up in this test, but if it were called it would fail since not patched)
@@ -137,6 +140,7 @@ class TestSolutionCrossChecker:
             transfer_amount_rao="1000000000",
             transfer_proof_message="msg",
             transfer_proof_signature_hex="sig",
+            validation_id="csv-1",
         )
         cross_checker.platform_client.get_next_cross_check_submission.return_value = submission
 

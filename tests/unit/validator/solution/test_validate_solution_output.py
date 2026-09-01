@@ -144,7 +144,11 @@ class TestValidateSolutionCorePaths:
             )
             assert status.upper() == "SUCCESS"
             platform_client.report_submission_status.assert_called_with(
-                "sub1", "Success", log_data_key="log_id", output_data_key="out-id"
+                "sub1",
+                "Success",
+                log_data_key="log_id",
+                output_data_key="out-id",
+                validation_id=None,
             )
 
     def test_perform_validation_failure_reports_failure_with_keys(self, tmp_path, platform_client):
@@ -177,6 +181,7 @@ class TestValidateSolutionCorePaths:
                 "sub1", "Failure",
                 reason="Milestone m1: Output validation failed",
                 log_data_key="log_id",
+                validation_id=None,
                 output_data_key="out-id",
                 failure_reason="IncorrectFailure",
             )

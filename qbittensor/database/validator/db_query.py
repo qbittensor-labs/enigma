@@ -55,6 +55,7 @@ class DBQuery(BaseDBQuery):
         miner_hotkey: str,
         challenge_id: str | None = None,
         max_solution_runtime_seconds: int | None = None,
+        validation_id: str | None = None,
     ) -> str | None:
         """Create (or re-use via guarded upsert) a challenge solution row for a tx_hash
         before the container/runtime fields are known.
@@ -89,6 +90,7 @@ class DBQuery(BaseDBQuery):
             miner_hotkey=miner_hotkey,
             cleaned=False,
             max_solution_runtime_seconds=max_solution_runtime_seconds,
+            validation_id=validation_id,
         )
 
     def update_challenge_solution_status_by_id(self, solution_id: str, solution_status: str) -> bool:
@@ -146,6 +148,7 @@ class DBQuery(BaseDBQuery):
         challenge_id: str | None = None,
         cleaned: bool = False,
         max_solution_runtime_seconds: int | None = None,
+        validation_id: str | None = None,
     ):
         """Insert (or upsert on tx_hash) a challenge solution record.
 
@@ -165,10 +168,17 @@ class DBQuery(BaseDBQuery):
         This disallows tx_hash reuse for different submissions / file uploads /
         challenges / milestones.
         """
-        bt.logging.info(f"Inserting/Upserting challenge solution with tx_hash: {tx_hash}")
+        bt.logging.info(
+            f"Inserting/Upserting challenge solution with tx_hash={tx_hash} validation_id={validation_id}"
+        )
+        if not validation_id:
+            bt.logging.error("❌ Refusing insert: platform validation_id is required")
+            return None
         try:
             with self._managed_session() as session:
-                existing = session.query(ChallengeSolution).filter_by(tx_hash=tx_hash).first()
+                existing = (
+                    session.query(ChallengeSolution).filter_by(validation_id=validation_id).first()
+                )
 
                 if existing:
                     # Check consistency of the key identifiers the cloud uses to identify
@@ -249,6 +259,7 @@ class DBQuery(BaseDBQuery):
                     submission_id=submission_id,
                     solution_status=solution_status,
                     tx_hash=tx_hash,
+                    validation_id=validation_id,
                     miner_hotkey=miner_hotkey,
                     cleaned=cleaned,
                     max_solution_runtime_seconds=max_solution_runtime_seconds,
@@ -256,7 +267,7 @@ class DBQuery(BaseDBQuery):
                     updated_at=now,
                 )
                 stmt = stmt.on_conflict_do_update(
-                    index_elements=["tx_hash"],
+                    index_elements=["validation_id"],
                     set_={
                         "challenge_validation_solution_id": challenge_validation_solution_id,
                         "container_id": container_id,
@@ -267,6 +278,7 @@ class DBQuery(BaseDBQuery):
                         "absolute_path_to_solution": absolute_path_to_solution,
                         "submission_id": submission_id,
                         "solution_status": solution_status,
+                        "tx_hash": tx_hash,
                         "miner_hotkey": miner_hotkey,
                         "cleaned": cleaned,
                         "max_solution_runtime_seconds": max_solution_runtime_seconds,
@@ -275,9 +287,7 @@ class DBQuery(BaseDBQuery):
                 )
                 session.execute(stmt)
 
-                # Return the authoritative id (the PK that was inserted or already present on re-use).
-                # Callers get the id directly from create/insert; no need for a follow-up tx_hash lookup.
-                row = session.query(ChallengeSolution).filter_by(tx_hash=tx_hash).first()
+                row = session.query(ChallengeSolution).filter_by(validation_id=validation_id).first()
                 if row:
                     action = "Re-used" if existing else "Inserted new"
                     bt.logging.info(
@@ -454,6 +464,7 @@ class DBQuery(BaseDBQuery):
                             miner_hotkey=solution.miner_hotkey,
                             tx_hash=solution.tx_hash,
                             challenge_milestone_id=solution.challenge_milestone_id,
+                            validation_id=solution.validation_id,
                         )
                         for solution in solutions
                     ]

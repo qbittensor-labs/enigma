@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import sys
 import threading
 from dataclasses import dataclass
@@ -51,7 +52,10 @@ import click
 import requests
 from bittensor.wallet import Keypair
 
-from qbittensor.database.db_connection import DBConnection
+from qbittensor.database.db_connection import (
+    DBConnection,
+    discover_existing_miner_dbs,
+)
 from rich import box
 from rich.align import Align
 from rich.console import Console, Group, RenderableType
@@ -76,6 +80,58 @@ from qbittensor.utils.transfer_proof import TRANSFER_DEST_SS58
 
 from qbittensor.cli.miner.utils.color import c, validator_status_color
 
+
+def _quiet_cli_logging() -> None:
+    """Drop bt.logging INFO so JWT/HTTP/DB traces do not interleave with Rich panels."""
+    if hasattr(bt.logging, "set_warning"):
+        bt.logging.set_warning()
+        return
+    import logging
+
+    logging.getLogger("enigma").setLevel(logging.WARNING)
+    logging.getLogger("bittensor").setLevel(logging.WARNING)
+
+
+def _clear_screen(console: Console) -> None:
+    """Full-screen navigation: wipe the terminal before each menu/view."""
+    if getattr(console, "is_terminal", False):
+        console.clear()
+
+
+def _pause_for_ack(console: Console, *, hint: str = "Go back") -> None:
+    """Hold the last printed error/status until the operator presses Esc.
+
+    Full-screen views call ``_clear_screen`` (and Live ``screen=True``) as soon as
+    they redraw. Without this pause, a Submission error panel is erased immediately.
+    """
+    console.print()
+    console.print(
+        Align.center(
+            Text.assemble(
+                ("Esc ", f"bold {c(1)}"),
+                (hint, f"dim {c(3)}"),
+            )
+        )
+    )
+    _wait_for_quit_key()
+
+
+def _wait_for_quit_key() -> None:
+    """Block until Esc (no typed prompt). Matches list/challenge navigation."""
+    if _HAVE_TERMIOS and sys.stdin.isatty():
+        try:
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+        except OSError:
+            pass
+        while True:
+            if _is_back_key(_read_key_unix()):
+                return
+    while True:
+        raw = (Prompt.ask("Esc", default="", show_default=False) or "").strip().lower()
+        if raw in ("esc", "escape"):
+            return
+
+
 try:
     import termios
     import tty
@@ -90,8 +146,12 @@ KEY_LEFT = "\x1b[D"
 KEY_RIGHT = "\x1b[C"
 KEY_ENTER = "\r"
 KEY_ENTER_ALT = "\n"
-KEY_Q = "q"
-KEY_Q_UPPER = "Q"
+KEY_ESC = "\x1b"
+
+
+def _is_back_key(key: str) -> bool:
+    """True only for a lone Esc. Arrow keys are ESC-prefixed and must not match."""
+    return key == KEY_ESC
 
 
 @dataclass(frozen=True)
@@ -103,6 +163,9 @@ class CliApiAuth:
     network: str
     netuid: int
     wallet_path: str | None = None  # optional custom wallets directory
+    # True when the operator passed --wallet.name / --wallet.hotkey / --wallet.path.
+    # Listing submissions uses this to decide "open first miner DB" vs "open this wallet's DB".
+    wallet_cli_specified: bool = False
 
 
 def _resolve_cli_netuid(netuid: int | None) -> int:
@@ -148,12 +211,18 @@ def _resolve_cli_api_auth(
     if path is not None:
         path = path.strip() or None
 
+    wallet_cli_specified = any(
+        v is not None and str(v).strip() != ""
+        for v in (wallet_name, wallet_hotkey, wallet_path)
+    )
+
     return CliApiAuth(
         wallet_name=cold,
         wallet_hotkey=hot,
         network=net,
         netuid=_resolve_cli_netuid(netuid),
         wallet_path=path,
+        wallet_cli_specified=wallet_cli_specified,
     )
 
 
@@ -380,6 +449,14 @@ def _confirm_fee_amount_before_unlock(
         )
     except Exception as e:
         raise click.ClickException(f"Failed to fetch fee amount for milestone: {e}") from e
+
+    if price_tao is None or float(price_tao) <= 0:
+        raise click.ClickException(
+            f"Milestone {milestone_id} has no submission fee configured "
+            f"(priceTao={price_tao}). The platform must return priceTao > 0. "
+            "Pick a different milestone (e.g. Mock Challenge → Milestone 1) "
+            "or set priceTao on this milestone."
+        )
 
     dest = TRANSFER_DEST_SS58
     console.print(
@@ -700,6 +777,19 @@ def submit_solution(
                 challenge_id=challenge_id, milestone_id=milestone_id
             )
 
+    required_validation_runs = 3
+    for ms in challenge_detail.get("milestones") or []:
+        if str(ms.get("id")) == str(milestone_id):
+            raw_runs = ms.get("required_validation_runs")
+            if raw_runs is not None:
+                try:
+                    parsed = int(raw_runs)
+                    if parsed >= 1:
+                        required_validation_runs = parsed
+                except (TypeError, ValueError):
+                    pass
+            break
+
     ensure_sufficient_balance_for_fee(
         source_ss58=source_ss58,
         network=network,
@@ -824,6 +914,7 @@ def submit_solution(
         transfer_block_hash=transfer_block_hash,
         transfer_to_ss58=TRANSFER_DEST_SS58,
         transfer_amount_rao=str(int(bt.Balance.from_tao(price_tao).rao)),
+        required_validation_runs=required_validation_runs,
     )
 
     return spec
@@ -842,6 +933,7 @@ def store_solution_in_database(
     transfer_block_hash: str,
     transfer_to_ss58: str,
     transfer_amount_rao: str,
+    required_validation_runs: int = 3,
 ) -> None:
     """Store the solution in the database keyed by miner hotkey."""
 
@@ -856,6 +948,7 @@ def store_solution_in_database(
         transfer_from_ss58=source_ss58,
         transfer_to_ss58=transfer_to_ss58,
         transfer_amount_rao=transfer_amount_rao,
+        required_validation_runs=required_validation_runs,
     )
     if inserted:
         console.print(
@@ -991,8 +1084,7 @@ def _format_milestone_prize(ms: dict[str, Any]) -> str:
     price_tao = ms.get("priceTao")
     if price_tao is not None:
         try:
-            if float(price_tao) > 0:
-                return f"{price_tao} TAO"
+            return f"{float(price_tao):g} TAO"
         except (TypeError, ValueError):
             pass
     prize_usd = ms.get("prizeUsd")
@@ -1054,7 +1146,7 @@ def _milestones_frame(
             ("Select milestone   ", f"dim {c(3)}"),
             ("Enter ", f"bold {c(0)}"),
             ("Upload zip   ", f"dim {c(3)}"),
-            ("q ", f"bold {c(1)}"),
+            ("Esc ", f"bold {c(1)}"),
             ("Back to challenges", f"dim {c(3)}"),
         )
     )
@@ -1080,18 +1172,20 @@ def format_milestones(
     # corrupts stdin and the prompt. Leave Live before run_milestone_solution_upload.
     while True:
         pending_id: str | None = None
+        _clear_screen(console)
         with Live(
             _milestones_frame(detail, milestones, selected),
             console=console,
             refresh_per_second=12,
-            transient=False,
+            screen=True,
+            transient=True,
         ) as live:
             while True:
                 if n:
                     selected = max(0, min(selected, n - 1))
                 live.update(_milestones_frame(detail, milestones, selected))
                 key = _read_key_unix()
-                if key in (KEY_Q, KEY_Q_UPPER):
+                if _is_back_key(key):
                     return
                 if key == KEY_UP:
                     if n:
@@ -1137,17 +1231,36 @@ def format_milestones(
                     border=f"bold {c(4)}",
                 )
             )
+        _pause_for_ack(console)
 
 
 def _read_key_unix() -> str:
+    """Read one key. Lone Esc is ``KEY_ESC``; arrow keys stay ESC+[A/B/C/D.
+
+    Uses ``os.read`` on the fd so Python's stdin buffer cannot swallow the
+    rest of an arrow sequence and leave us treating ↑ as Esc.
+    """
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     try:
         tty.setcbreak(fd)
-        ch = sys.stdin.read(1)
-        if ch == "\x1b":
-            ch += sys.stdin.read(2)
-        return ch
+        first = os.read(fd, 1)
+        if not first:
+            return ""
+        if first != b"\x1b":
+            return first.decode("utf-8", errors="replace")
+        seq = first
+        while len(seq) < 3:
+            ready, _, _ = select.select([fd], [], [], 0.05)
+            if not ready:
+                break
+            nxt = os.read(fd, 1)
+            if not nxt:
+                break
+            seq += nxt
+        if seq == b"\x1b":
+            return KEY_ESC
+        return seq.decode("utf-8", errors="replace")
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
@@ -1300,7 +1413,7 @@ def _build_challenges_frame(
             (f"{label}   ", f"dim {c(3)}"),
             ("Enter ", f"bold {c(0)}"),
             ("Confirm   ", f"dim {c(3)}"),
-            ("q ", f"bold {c(1)}"),
+            ("Esc ", f"bold {c(1)}"),
             ("Quit", f"dim {c(3)}"),
         )
     )
@@ -1346,11 +1459,13 @@ def query_and_format_challenges(
 
     while True:
         pending: dict[str, Any] | None = None
+        _clear_screen(console)
         with Live(
             _build_challenges_frame(payload, view_index, view_labels, selected_row),
             console=console,
             refresh_per_second=8,
-            transient=False,
+            screen=True,
+            transient=True,
         ) as live:
             while True:
                 if n_rows:
@@ -1361,7 +1476,7 @@ def query_and_format_challenges(
                     )
                 )
                 key = _read_key_unix()
-                if key in (KEY_Q, KEY_Q_UPPER):
+                if _is_back_key(key):
                     return payload
                 if key == KEY_UP:
                     if n_rows:
@@ -1416,6 +1531,16 @@ def query_and_format_challenges(
     help="Custom path to the wallets directory.",
 )
 @click.option(
+    "--db",
+    "db_name",
+    default=None,
+    help=(
+        "Miner SQLite file to open when listing submissions (filename in the data dir, "
+        "or an absolute path). Default: first miner_submissions*.db. Ignored when "
+        "submitting; submit always uses the wallet hotkey file."
+    ),
+)
+@click.option(
     "--network",
     default=None,
     help="Bittensor network label passed to RequestManager (default: NETWORK env or finney).",
@@ -1432,10 +1557,12 @@ def main(
     wallet_name: str | None,
     wallet_hotkey: str | None,
     wallet_path: str | None,
+    db_name: str | None,
     network: str | None,
     netuid: int | None,
 ) -> None:
     """Welcome banner, then browse challenges response views."""
+    _quiet_cli_logging()
     # Environment is already loaded at module import time via get_api_config()
     # (which calls load_dotenv()). _resolve_cli_api_auth reads directly from os.getenv.
     api_auth = _resolve_cli_api_auth(
@@ -1446,16 +1573,26 @@ def main(
         netuid=netuid,
     )
     console = Console()
-    console.print()
-    console.print(Align.center(_welcome_panel(api_auth.network)))
-    console.print()
-
-    run_miner_main_menu(console, base_url=base_url, api_auth=api_auth)
+    run_miner_main_menu(
+        console, base_url=base_url, api_auth=api_auth, db_name=db_name
+    )
 
 
-def run_miner_main_menu(console: Console, base_url: str | None, api_auth: CliApiAuth) -> None:
+def run_miner_main_menu(
+    console: Console,
+    base_url: str | None,
+    api_auth: CliApiAuth,
+    db_name: str | None = None,
+) -> None:
     """Top-level interactive menu for the miner operator."""
+    first = True
     while True:
+        _clear_screen(console)
+        if first:
+            console.print()
+            console.print(Align.center(_welcome_panel(api_auth.network)))
+            console.print()
+            first = False
         console.print()
         console.print(Panel.fit(
             "[bold]What would you like to do?[/]",
@@ -1464,22 +1601,33 @@ def run_miner_main_menu(console: Console, base_url: str | None, api_auth: CliApi
         ))
 
         options = [
-            ("1", "Submit a new solution"),
-            ("2", "List my submissions (with status)"),
-            ("q", "Quit"),
+            ("1", "Submit Solution"),
+            ("2", "List Submissions"),
+            ("Esc", "Quit"),
         ]
-
+        key_width = max(len(key) for key, _ in options)
         for key, label in options:
-            console.print(f"  [{c(2)}]{key}[/]  {label}")
+            padded = f"{key:<{key_width}}"
+            console.print(f"  [{c(2)}]{padded}[/]  {label}")
 
-        choice = Prompt.ask(
-            "\nChoice",
-            choices=["1", "2", "q", "Q"],
-            show_choices=False,
-            default="1",
-        ).strip().lower()
+        if _HAVE_TERMIOS and sys.stdin.isatty():
+            choice = ""
+            while choice not in ("1", "2", "esc"):
+                key = _read_key_unix()
+                if key == "1":
+                    choice = "1"
+                elif key == "2":
+                    choice = "2"
+                elif _is_back_key(key):
+                    choice = "esc"
+        else:
+            choice = Prompt.ask(
+                "\nChoice",
+                choices=["1", "2", "esc"],
+                show_choices=False,
+            ).strip().lower()
 
-        if choice in ("q", "quit"):
+        if choice == "esc":
             console.print("Goodbye!")
             break
 
@@ -1492,10 +1640,11 @@ def run_miner_main_menu(console: Console, base_url: str | None, api_auth: CliApi
                 )
             except Exception as e:
                 console.print(f"[red]Error during submission flow:[/] {e}")
+                _pause_for_ack(console)
             continue
 
         if choice == "2":
-            _list_my_submissions(console, api_auth)
+            _list_my_submissions(console, api_auth, db_name=db_name)
             continue
 
 
@@ -1547,7 +1696,7 @@ def _submission_table(submissions: list[dict], selected: int) -> Table:
     table.add_column("TX (short)", style="dim")
     table.add_column("Milestone", style="cyan")
     table.add_column("Submitted", style="green")
-    table.add_column("Validator Statuses", style="white")
+    table.add_column("Validations", style="white")
 
     if not submissions:
         table.add_row("—", "[dim]No submissions[/dim]", "", "", "")
@@ -1568,23 +1717,12 @@ def _submission_table(submissions: list[dict], selected: int) -> Table:
             else "[dim]—[/dim]"
         )
 
-        status_lines = []
-        validator_statuses = sub.get("validator_statuses") or {}
-        has_failure = any(
-            str(info.get("status", "")).lower()
-            not in ("success", "submitted", "pending", "running", "notrun")
-            for info in validator_statuses.values()
+        runs = sub.get("runs") or []
+        required = int(sub.get("required_validation_runs") or 3)
+        success_n = sum(
+            1 for r in runs if str(r.get("status", "")).lower() == "success"
         )
-        for vhotkey, info in validator_statuses.items():
-            status = info.get("status", "?")
-            st_lower = str(status).lower()
-            if has_failure and st_lower in ("submitted", "pending", "running", "notrun"):
-                status_lines.append("[dim]—[/dim]")
-                continue
-            color = validator_status_color(status)
-            status_lines.append(f"[{color}]{status}[/]")
-
-        status_display = "  ".join(status_lines) if status_lines else "[dim]—[/dim]"
+        status_display = f"{success_n}/{required}"
 
         table.add_row(
             marker,
@@ -1606,7 +1744,7 @@ def _submissions_frame(submissions: list[dict], selected: int, hotkey_short: str
             ("Select   ", f"dim {c(3)}"),
             ("Enter ", f"bold {c(0)}"),
             ("Details   ", f"dim {c(3)}"),
-            ("q ", f"bold {c(1)}"),
+            ("Esc ", f"bold {c(1)}"),
             ("Back to menu", f"dim {c(3)}"),
         )
     )
@@ -1615,6 +1753,7 @@ def _submissions_frame(submissions: list[dict], selected: int, hotkey_short: str
 
 def _show_submission_details(console: Console, sub: dict[str, Any]) -> None:
     """Drill-down view for a single submission (shown after pressing Enter on the list)."""
+    _clear_screen(console)
     tx = sub.get("tx_hash", "?")
     ms_id = sub.get("challenge_milestone_id", "?")
     submitted = sub.get("submitted_at")
@@ -1628,31 +1767,31 @@ def _show_submission_details(console: Console, sub: dict[str, Any]) -> None:
     body.append("Submitted:   ", style="dim")
     body.append(submitted_str + "\n\n", style="green")
 
-    statuses = sub.get("validator_statuses") or {}
-    if statuses:
-        body.append("Validator Reports:\n", style="bold")
-        # If any validator reported a failure, hide 'Submitted' for the others
-        has_failure = any(
-            str(info.get("status", "")).lower()
-            not in ("success", "submitted", "pending", "running", "notrun")
-            for info in statuses.values()
-        )
-        for vhotkey, info in statuses.items():
+    runs = sub.get("runs") or []
+    required = int(sub.get("required_validation_runs") or 3)
+    success_n = sum(
+        1 for r in runs if str(r.get("status", "")).lower() == "success"
+    )
+    body.append("Validations: ", style="dim")
+    body.append(f"{success_n}/{required}\n\n", style="bold")
+    if runs:
+        body.append("Runs:\n", style="bold")
+        for info in runs:
             status = info.get("status", "?")
-            st_lower = str(status).lower()
-            ts = info.get("reported_at")
+            vid = info.get("validation_id") or "—"
+            vhotkey = info.get("validator_hotkey") or ""
+            ts = info.get("updated_at")
             ts_str = ts.strftime("%Y-%m-%d %H:%M") if ts else ""
-            body.append(f"  {_short_ss58(vhotkey)}  ", style="dim")
-            if has_failure and st_lower in ("submitted", "pending", "running", "notrun"):
-                body.append("[dim]—[/]", style="dim")
-            else:
-                color = validator_status_color(status)
-                body.append(f"[{color}]{status}[/]", style=color)
+            color = validator_status_color(status)
+            body.append(f"  {str(vid)[:8]}  ", style="dim")
+            body.append(str(status), style=color)
+            if vhotkey:
+                body.append(f"  {_short_ss58(vhotkey)}", style="dim")
             if ts_str:
                 body.append(f"  ({ts_str})", style="dim")
             body.append("\n")
     else:
-        body.append("[dim]No validator status reports received yet.[/dim]")
+        body.append("No validator status reports received yet.", style="dim")
 
     panel = Panel(
         body,
@@ -1660,32 +1799,99 @@ def _show_submission_details(console: Console, sub: dict[str, Any]) -> None:
         border_style=f"dim {c(4)}",
         box=box.ROUNDED,
     )
+    footer = Align.center(
+        Text.assemble(
+            ("Esc ", f"bold {c(1)}"),
+            ("Back to Your Submissions", f"dim {c(3)}"),
+        )
+    )
     console.print(panel)
-    Prompt.ask("Press Enter to return to list", default="", show_default=False)
+    console.print()
+    console.print(footer)
+    _wait_for_quit_key()
 
 
-def _list_my_submissions(console: Console, api_auth: CliApiAuth) -> None:
-    """Interactive list of your submissions (↑↓ to select, Enter for details, q to go back).
+def _hotkey_stub_from_miner_db_filename(filename: str) -> str:
+    """Recover the hotkey prefix encoded in ``miner_submissions_<prefix>.db``."""
+    stem = Path(filename).stem
+    prefix = MINER_DB_TABLE_PREFIX + "_"
+    if stem.startswith(prefix) and len(stem) > len(prefix):
+        return stem[len(prefix):]
+    return stem or MINER_DB_TABLE_PREFIX
+
+
+def resolve_miner_list_db(
+    api_auth: CliApiAuth,
+    db_name: str | None = None,
+    data_dir: str | None = None,
+) -> tuple[str, str | None]:
+    """Pick which miner SQLite file the CLI list view should open.
+
+    Returns ``(hotkey, db_name_override)``. ``db_name_override`` is passed to
+    ``DBConnection(db_name=...)`` when the file is chosen by ``--db`` or by
+    "first existing miner DB"; ``None`` means use the hotkey-derived filename.
+
+    Order:
+      1. ``--db``
+      2. Wallet was passed on the CLI (or ``MINER_HOTKEY_SS58``) → that hotkey's file
+      3. First ``miner_submissions*.db`` in the data directory
+    """
+    if db_name and str(db_name).strip():
+        chosen = str(db_name).strip()
+        return _hotkey_stub_from_miner_db_filename(chosen), chosen
+
+    env_hotkey = (os.getenv("MINER_HOTKEY_SS58") or "").strip()
+    if env_hotkey or api_auth.wallet_cli_specified:
+        return _get_miner_hotkey_ss58(api_auth), None
+
+    existing = discover_existing_miner_dbs(data_dir=data_dir)
+    if not existing:
+        raise click.ClickException(
+            "No miner_submissions*.db files found in the data directory.\n"
+            "Pass --wallet.name / --wallet.hotkey / --wallet.path to open a "
+            "specific miner DB, or --db FILENAME."
+        )
+    first = existing[0]
+    return _hotkey_stub_from_miner_db_filename(first.name), first.name
+
+
+def _list_my_submissions(
+    console: Console,
+    api_auth: CliApiAuth,
+    db_name: str | None = None,
+) -> None:
+    """Interactive list of your submissions (↑↓ to select, Enter for details, Esc to go back).
 
     Uses the same Live + arrow-key pattern as the challenge and milestone lists.
     IMPORTANT: All blocking input (Prompt) must happen *outside* any Live context,
-    otherwise terminal state gets corrupted and 'q' / arrow keys become flaky.
+    otherwise terminal state gets corrupted and Esc / arrow keys become flaky.
     """
     try:
-        miner_hotkey = _get_miner_hotkey_ss58(api_auth)
+        miner_hotkey, db_override = resolve_miner_list_db(api_auth, db_name=db_name)
     except click.ClickException as e:
         console.print(f"[red]{e}[/red]")
+        _pause_for_ack(console)
         return
 
     db_connection = DBConnection(
         database_name_prefix=MINER_DB_TABLE_PREFIX,
         hotkey=miner_hotkey,
+        db_name=db_override,
     )
     submissions = db_connection.db_query_miner.list_my_submissions_with_status(limit=100)
 
     if not submissions:
         console.print("[yellow]No submissions found in your local database.[/]")
-        Prompt.ask("Press Enter to return to menu", default="", show_default=False)
+        console.print()
+        console.print(
+            Align.center(
+                Text.assemble(
+                    ("Esc ", f"bold {c(1)}"),
+                    ("Back to menu", f"dim {c(3)}"),
+                )
+            )
+        )
+        _wait_for_quit_key()
         return
 
     hotkey_short = _short_ss58(miner_hotkey)
@@ -1696,22 +1902,33 @@ def _list_my_submissions(console: Console, api_auth: CliApiAuth) -> None:
     if not _HAVE_TERMIOS or not sys.stdin.isatty():
         # Non-interactive fallback
         console.print(_submission_table(submissions, 0))
-        Prompt.ask("Press Enter to return to menu", default="", show_default=False)
+        console.print()
+        console.print(
+            Align.center(
+                Text.assemble(
+                    ("Esc ", f"bold {c(1)}"),
+                    ("Back to menu", f"dim {c(3)}"),
+                )
+            )
+        )
+        _wait_for_quit_key()
         return
 
     while True:
+        _clear_screen(console)
         with Live(
             _submissions_frame(submissions, selected, hotkey_short),
             console=console,
             refresh_per_second=12,
-            transient=False,
+            screen=True,
+            transient=True,
         ) as live:
             while True:
                 selected = max(0, min(selected, n - 1))
                 live.update(_submissions_frame(submissions, selected, hotkey_short))
                 key = _read_key_unix()
 
-                if key in (KEY_Q, KEY_Q_UPPER):
+                if _is_back_key(key):
                     return
 
                 if key == KEY_UP:
@@ -1726,7 +1943,6 @@ def _list_my_submissions(console: Console, api_auth: CliApiAuth) -> None:
         if pending_sub is not None:
             _show_submission_details(console, pending_sub)
             pending_sub = None
-            # Loop back → new Live will be created with current selection
             continue
 
 

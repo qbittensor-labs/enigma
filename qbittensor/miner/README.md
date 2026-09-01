@@ -29,6 +29,8 @@ mine-enigma
 
 (You may need to reactivate your virtualenv or run `hash -r` for the new command to appear.)
 
+**Listing submissions** does not require a wallet. With no `--wallet.*` flags the CLI opens the first `miner_submissions*.db` in the data directory. Pass `--wallet.name` / `--wallet.hotkey` / `--wallet.path` to open that hotkey's file, or `--db FILENAME` to pick one explicitly.
+
 During interactive submission, the CLI asks for:
 
 - Path to `.zip` solution

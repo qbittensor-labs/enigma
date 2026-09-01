@@ -17,7 +17,7 @@
 
 import logging
 import uuid
-from sqlalchemy import Column, String, DateTime, ForeignKey, func, UniqueConstraint
+from sqlalchemy import Column, String, DateTime, ForeignKey, Integer, Index, text, func
 from ..base import Base
 
 
@@ -40,6 +40,7 @@ class MinerSubmission(Base):
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     submitted_at = Column(DateTime, nullable=True)
+    required_validation_runs = Column(Integer, nullable=False, default=3)
 
     def __repr__(self):
         return (
@@ -65,15 +66,24 @@ class MinerSubmissionStatus(Base):
         ForeignKey("miner_submissions.tx_hash"),
         nullable=False,
     )
+    validation_id = Column(String(50), nullable=True)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
     __table_args__ = (
-        UniqueConstraint(
+        Index(
+            "uq_miner_submission_status_validation_id",
+            "validation_id",
+            unique=True,
+            sqlite_where=text("validation_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_miner_submission_status_offer_marker",
             "validator_hotkey",
             "tx_hash",
             "challenge_milestone_id",
-            name="uq_miner_submission_status_per_validator_tx_milestone",
+            unique=True,
+            sqlite_where=text("validation_id IS NULL"),
         ),
     )
 

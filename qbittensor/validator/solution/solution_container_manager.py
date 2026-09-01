@@ -318,6 +318,7 @@ class SolutionContainerManager:
                 submission_id=info.submission_id,
                 challenge_milestone_id=info.challenge_milestone_id,
                 challenge_id=info.challenge_id,
+                validation_id=info.validation_id or None,
                 exit_code=info.exit_code,
                 extraction=info.extraction,
             )
@@ -531,6 +532,7 @@ class SolutionContainerManager:
                     miner_hotkey=solution.miner_hotkey,
                     download_url="",
                     solution_id=solution.id,
+                    validation_id=getattr(solution, "validation_id", "") or "",
                 )
                 infos.append(
                     SolutionPostProcessInfo(
@@ -966,6 +968,7 @@ class SolutionContainerManager:
                     failure_reason=failure_reason,
                     log_data_key=log_data_key,
                     output_data_key=output_data_key,
+                    validation_id=getattr(sol, "validation_id", None),
                 )
                 fr_note = f" fr={failure_reason}" if failure_reason else ""
                 keys_note = (

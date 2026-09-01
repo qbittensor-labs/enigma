@@ -18,6 +18,7 @@
 """Canonical transfer↔miner binding for synapse verification (off-chain + on-chain)."""
 
 from __future__ import annotations
+import hashlib
 import os
 from typing import Any
 
@@ -381,6 +382,75 @@ def _find_remark_data_in_calls(calls: list[dict]) -> bytes | None:
     return None
 
 
+def _rpc_result(substrate: Any, method: str, params: list[Any]) -> Any:
+    """Return the JSON-RPC ``result`` payload, or None if the client cannot RPC."""
+    rpc = getattr(substrate, "rpc_request", None)
+    if rpc is None:
+        return None
+    resp = rpc(method, params)
+    if isinstance(resp, dict) and "result" in resp:
+        return resp["result"]
+    return resp
+
+
+def _fetch_extrinsic_via_chain_get_block(
+    substrate: Any,
+    block_hash: str,
+    extrinsic_hash: str,
+) -> Any | None:
+    """Decode a fee extrinsic from ``chain_getBlock`` using current runtime metadata.
+
+    Lite nodes and the default localnet prune *state*, so
+    ``retrieve_extrinsic_by_hash`` / ``get_block`` fail with ``State discarded``.
+    Block *bodies* are still stored. ``chain_getBlock`` returns the raw
+    extrinsics; we decode them against the node's current metadata (runtime
+    does not change on localnet) and match by blake2/extrinsic hash.
+
+    Inclusion in a canonical block is treated as success because events/state
+    for that block are no longer available.
+    """
+    wanted = _normalize_0x_hash(extrinsic_hash)
+    try:
+        result = _rpc_result(substrate, "chain_getBlock", [_normalize_0x_hash(block_hash)])
+    except Exception as e:
+        bt.logging.debug(f"chain_getBlock RPC failed for {block_hash}: {e}")
+        return None
+    if not isinstance(result, dict):
+        return None
+    block = result.get("block") if isinstance(result.get("block"), dict) else result
+    extrinsics = block.get("extrinsics") if isinstance(block, dict) else None
+    if not isinstance(extrinsics, list):
+        return None
+
+    decode = getattr(substrate, "decode_scale", None)
+    for hexex in extrinsics:
+        if not isinstance(hexex, str):
+            continue
+        decoded = None
+        if decode is not None:
+            try:
+                decoded = decode("Extrinsic", hexex)
+            except Exception as e:
+                bt.logging.debug(f"decode_scale(Extrinsic) failed: {e}")
+        raw = bytes.fromhex(hexex[2:] if hexex.startswith("0x") else hexex)
+        raw_hash = "0x" + hashlib.blake2b(raw, digest_size=32).hexdigest()
+        decoded_hash = None
+        val = getattr(decoded, "value", None) if decoded is not None else None
+        if isinstance(val, dict):
+            decoded_hash = val.get("extrinsic_hash")
+        elif isinstance(decoded, dict):
+            decoded_hash = decoded.get("extrinsic_hash")
+        hashes = {_normalize_0x_hash(h) for h in (raw_hash, decoded_hash) if h}
+        if wanted not in hashes:
+            continue
+        bt.logging.info(
+            f"Decoded fee extrinsic {wanted} from chain_getBlock body "
+            f"(state was pruned; using current runtime metadata)"
+        )
+        return decoded if decoded is not None else {"extrinsic_hash": raw_hash}
+    return None
+
+
 def parse_fee_binding_remark(remark_bytes: bytes) -> dict[str, str]:
     """
     Parse the canonical remark produced by the CLI.
@@ -492,6 +562,14 @@ def _verify_batch_fee_payment_on_chain(
             except Exception:
                 ex = None
     else:
+        # Pruned-state path: block bodies are still available via chain_getBlock even
+        # when retrieve_extrinsic_by_hash / get_block fail with "State discarded".
+        ex = _fetch_extrinsic_via_chain_get_block(substrate, block_hash, extrinsic_hash)
+        if ex is not None:
+            success = True
+            error_message = None
+
+    if ex is None and receipt is None:
         # Old block / no receipt path: use Subscan (public indexer with full history) + get_block
         bt.logging.info(
             f"Using public indexer (Subscan) + get_block fallback for historical fee extrinsic {extrinsic_hash}"
@@ -546,11 +624,17 @@ def _verify_batch_fee_payment_on_chain(
             except Exception:
                 ex = None
 
+    if ex is None:
+        ex = _fetch_extrinsic_via_chain_get_block(substrate, block_hash, extrinsic_hash)
+        if ex is not None:
+            success = True
+            error_message = None
+
     if not success:
         return False, f"fee payment extrinsic did not succeed: {error_message}"
 
     if ex is None:
-        return False, "could not decode fee payment extrinsic (tried receipt, get_block, and Subscan)"
+        return False, "could not decode fee payment extrinsic (tried receipt, get_block, chain_getBlock, and Subscan)"
 
     signer = _signer_ss58(ex, substrate)
     if not signer:

@@ -70,6 +70,20 @@ class TestConfirmFeeAmountBeforeUnlock:
 
         assert result is None
 
+    def test_rejects_zero_price_tao_before_confirm(self):
+        console = make_console()
+        client = make_challenges_client(price_tao=0.0)
+
+        with pytest.raises(click.ClickException, match="no submission fee configured"):
+            _confirm_fee_amount_before_unlock(
+                console=console,
+                challenges_client=client,
+                milestone_id="m1",
+                challenge_id="ch1",
+            )
+        rendered = console.export_text()
+        assert "Proceed?" not in rendered
+
     def test_raises_click_exception_on_price_fetch_failure(self):
         console = make_console()
         client = MagicMock()

@@ -122,7 +122,8 @@ class TestDBQueryMiner:
         listed = miner_query.list_my_submissions_with_status(limit=10)
         sub = next((s for s in listed if s["tx_hash"] == "0xfirst-offer"), None)
         assert sub is not None
-        assert sub["validator_statuses"]["5Val1"]["status"] == "Submitted"
+        # Offer markers (Submitted, no validation_id) are not listed as runs.
+        assert sub["runs"] == []
 
     def test_get_next_for_validator_reoffers_on_submitted(self, miner_query, miner_db):
         """'Submitted' marker does not count as seen; re-offer until real status arrives."""
@@ -169,6 +170,6 @@ class TestDBQueryMiner:
         listed = miner_query.list_my_submissions_with_status(limit=5)
         sub = next((s for s in listed if s["tx_hash"] == "0xlist"), None)
         assert sub is not None
-        vs = sub["validator_statuses"]
-        assert vs["5V-A"]["status"] == "Running"
-        assert vs["5V-B"]["status"] == "WallTimeFailure"
+        by_hk = {r["validator_hotkey"]: r["status"] for r in sub["runs"]}
+        assert by_hk["5V-A"] == "Running"
+        assert by_hk["5V-B"] == "WallTimeFailure"

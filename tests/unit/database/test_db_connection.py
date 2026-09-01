@@ -25,6 +25,7 @@ from qbittensor.database.db_connection import (
     _first_project_root_walking_up,
     _package_fallback_project_root,
     _resolve_db_dir,
+    discover_existing_miner_dbs,
 )
 
 
@@ -77,3 +78,22 @@ class TestDBConnection:
     def test_db_filename_uses_hotkey_prefix(self, tmp_data_dir):
         conn = DBConnection("miner_submissions", "5GhLXHotkeyAddress")
         assert conn.DB_PATH.endswith("miner_submissions_5GhLX.db")
+
+    def test_db_name_override_uses_filename_not_hotkey(self, tmp_data_dir):
+        conn = DBConnection(
+            "miner_submissions",
+            "5WouldHaveBeenUsed",
+            data_dir=str(tmp_data_dir),
+            db_name="miner_submissions_picked",
+        )
+        assert Path(conn.DB_PATH) == tmp_data_dir / "miner_submissions_picked.db"
+
+    def test_discover_existing_miner_dbs_sorted(self, tmp_data_dir):
+        (tmp_data_dir / "miner_submissions_bbbbb.db").write_bytes(b"")
+        (tmp_data_dir / "miner_submissions_aaaaa.db").write_bytes(b"")
+        (tmp_data_dir / "challenge_solutions_zzzzz.db").write_bytes(b"")
+        found = discover_existing_miner_dbs(data_dir=str(tmp_data_dir))
+        assert [p.name for p in found] == [
+            "miner_submissions_aaaaa.db",
+            "miner_submissions_bbbbb.db",
+        ]

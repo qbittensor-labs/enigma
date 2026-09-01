@@ -46,6 +46,7 @@ def validate_solution(
     submission_id: str,
     challenge_milestone_id: str,
     challenge_id: str,
+    validation_id: str | None = None,
     *,
     exit_code: int = -1,
     extraction: OutputExtractionStatus | None = None,
@@ -102,6 +103,7 @@ def validate_solution(
         challenge_id=challenge_id,
         exit_code=exit_code,
         extraction=extraction,
+        validation_id=validation_id,
     )
     return solution_status
 
@@ -132,6 +134,7 @@ def perform_solution_output_validation(
     logs_uploaded: bool = True,
     exit_code: int = -1,
     extraction: OutputExtractionStatus | None = None,
+    validation_id: str | None = None,
 ) -> str:
     """
     Perform the actual validation of the solution output.
@@ -176,6 +179,7 @@ def perform_solution_output_validation(
                 report_payload["status"],
                 log_data_key=report_payload["log_data_key"],
                 output_data_key=report_payload["output_data_key"],
+                validation_id=validation_id,
             ):
                 bt.logging.info("\t✅ Successfully updated platform with successful validation status")
                 return SolutionStatus.SUCCESS.value
@@ -219,6 +223,7 @@ def perform_solution_output_validation(
         log_data_key=report_payload["log_data_key"],
         output_data_key=report_payload["output_data_key"],
         failure_reason=failure_reason.value,
+        validation_id=validation_id,
     ):
         bt.logging.info("\t✅ Successfully updated platform with failed validation status")
         return failure_reason.value

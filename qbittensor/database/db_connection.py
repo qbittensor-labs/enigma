@@ -102,6 +102,18 @@ def _project_root_from_cwd() -> Path | None:
     return _first_project_root_walking_up(Path.cwd())
 
 
+def discover_existing_miner_dbs(data_dir: str | None = None) -> list[Path]:
+    """Existing ``miner_submissions*.db`` files in the data dir, sorted by name.
+
+    Used by the miner CLI to list submissions without loading a wallet: pick
+    the first file unless the operator passed ``--db`` or wallet flags.
+    """
+    db_dir = _resolve_db_dir(data_dir_override=data_dir)
+    if not db_dir.is_dir():
+        return []
+    return sorted(p for p in db_dir.glob("miner_submissions*.db") if p.is_file())
+
+
 def _resolve_db_dir(data_dir_override: str | None = None) -> Path:
     """``<project-root>/data`` where project root is detected structurally (name-agnostic)."""
     if data_dir_override:
@@ -152,14 +164,31 @@ class DBConnection:
 
     # `database_name` is either "challenge_solutions" or "miner_submissions"
 
-    def __init__(self, database_name_prefix: str, hotkey: str, telemetry_service: "TelemetryService | None" = None, data_dir: str | None = None):
+    def __init__(
+        self,
+        database_name_prefix: str,
+        hotkey: str,
+        telemetry_service: "TelemetryService | None" = None,
+        data_dir: str | None = None,
+        db_name: str | None = None,
+    ):
         self.database_name_prefix = database_name_prefix
         self.telemetry_service: "TelemetryService | None" = telemetry_service
         DB_DIR = _resolve_db_dir(data_dir_override=data_dir)
-        DB_NAME = f'{database_name_prefix}_{hotkey[0:5]}.db'
-        os.makedirs(DB_DIR, exist_ok=True)
-
-        self.DB_PATH = str(DB_DIR / DB_NAME)
+        if db_name:
+            raw = Path(str(db_name).strip()).expanduser()
+            if raw.suffix.lower() != ".db":
+                raw = raw.with_name(raw.name + ".db")
+            if raw.is_absolute():
+                self.DB_PATH = str(raw)
+                os.makedirs(raw.parent, exist_ok=True)
+            else:
+                os.makedirs(DB_DIR, exist_ok=True)
+                self.DB_PATH = str(DB_DIR / raw.name)
+        else:
+            DB_NAME = f"{database_name_prefix}_{hotkey[0:5]}.db"
+            os.makedirs(DB_DIR, exist_ok=True)
+            self.DB_PATH = str(DB_DIR / DB_NAME)
         self.DATABASE_URL = f"sqlite:///{self.DB_PATH}"
         self.create_database()
 
