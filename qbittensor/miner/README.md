@@ -5,6 +5,21 @@ The miner has two cooperating parts:
 - A CLI (`cli/mine_enigma.py`) that lets an operator browse challenges, upload a `.zip` to storage, pay the TAO transfer fee only after the storage upload succeeds, and store a submission record locally (this cli tool can be run from the repo root with the `mine-enigma` command).
 - A miner neuron (`neurons/miner.py`) that serves validators over Bittensor synapses by reading that local submission record and returning a `SolutionCandidate` plus transfer proof data.
 
+## Test on the workbench before you submit
+
+`pip install -e .` registers `enigma-workbench`. From the repo root, Docker mode
+(the default) is what the validator runs:
+
+```bash
+enigma-workbench test breaking-rsa --solution ./my_solver/
+enigma-workbench test hardening-quantum-proof --solution ./my_solver/
+```
+
+Zip that same directory after a pass. `test`/`build` copy `qbittensor/challenges`
+into `enigma_challenges/` if it is missing.
+
+Details: [workbench/README.md](../../workbench/README.md).
+
 ## What The CLI Does
 
 The `mine-enigma` CLI is an operator workflow for preparing a submission that the running miner can later serve to validators.
@@ -15,8 +30,8 @@ High-level flow:
 2. Query challenge data from the Enigma Challenges API.
 3. Let the user pick a challenge/milestone and `.zip` file.
 4. Request an upload slot from `POST /v1/submissions/upload` (JWT-authenticated via `RequestManager`).
-5. Send the TAO fee payment on-chain as a `Utility.batch_all` containing a `Balances.transfer_keep_alive` + a `System.remark_with_event` (signed by your fee coldkey). The remark contains the canonical binding between the payment and your specific submission.
-6. Upload the zip to the presigned upload URL returned by the API.
+5. Upload the zip to the presigned upload URL returned by the API.
+6. Send the TAO fee payment on-chain as a `Utility.batch_all` containing a `Balances.transfer_keep_alive` + a `System.remark_with_event` (signed by your fee coldkey). The remark contains the canonical binding between the payment and your specific submission. The fee is never paid until the storage upload has succeeded.
 7. Upsert a row into the local SQLite miner DB (`miner_submissions_<hotkey_prefix>.db`).
 
 ## CLI Usage
@@ -227,13 +242,14 @@ On startup the miner logs the number of hotkeys it is currently gating to:
 ## End-to-End Operator Workflow
 
 1. Configure `.env`.
-2. Run `mine-enigma` and upload your milestone `.zip`.
-3. CLI performs (in this order):
+2. Test on the [workbench](../../workbench/README.md) in Docker mode; zip after a pass ([above](#test-on-the-workbench-before-you-submit)).
+3. Run `mine-enigma` and upload your milestone `.zip`.
+4. CLI performs (in this order):
    - challenge API interaction + upload slot request
    - direct upload of the `.zip` to storage (via presigned PUT/POST)
    - TAO fee transfer (only after the storage upload returns success)
    - submission upsert to local DB
-4. Run the miner neuron:
+5. Run the miner neuron:
 
 ```bash
 python neurons/miner.py --netuid 63 --logging.info --wallet.name <your_wallet_name> --wallet.hotkey <your_hotkey>
@@ -243,4 +259,4 @@ python neurons/miner.py --netuid 63 --logging.info --wallet.name <your_wallet_na
    - `--treasury.trusted_hotkeys "5Hotkey1,5Hotkey2"`
    - `--treasury.disable_whitelist_check`
 
-5. As validators query your miner, it serves DB-backed submissions over synapses (only to trusted validators by default).
+6. As validators query your miner, it serves DB-backed submissions over synapses (only to trusted validators by default).

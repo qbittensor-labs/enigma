@@ -182,3 +182,25 @@ proposals
 # Private/test solutions (never publish)
 workbench/challenges/*/test_solution/
 workbench/challenges/*/participant_solution/
+
+# User solvers and unpublished challenge types. Shipped example_solution,
+# sample_circuits, READMEs, and the three challenge packages stay tracked.
+workbench/challenges/*/
+!workbench/challenges/breaking_rsa/
+!workbench/challenges/hardening_quantum_proof/
+!workbench/challenges/mock_challenge/
+workbench/challenges/*/*
+!workbench/challenges/*/README.md
+!workbench/challenges/*/example_solution/
+!workbench/challenges/*/example_solution/**
+!workbench/challenges/*/sample_circuits/
+!workbench/challenges/*/sample_circuits/**
+workbench/challenges/*.py
+!workbench/challenges/__init__.py
+!workbench/challenges/breaking_rsa.py
+!workbench/challenges/hardening_quantum_proof.py
+!workbench/challenges/mock.py
+!workbench/challenges/registry.py
+
+# Written by enigma-workbench test/build; zip this dir, do not commit it.
+workbench/challenges/*/example_solution/enigma_challenges/

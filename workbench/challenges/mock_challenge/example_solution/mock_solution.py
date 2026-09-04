@@ -49,19 +49,15 @@ Inputs still come from ``/challenge_input/...`` (read-only bind mount).
 from __future__ import annotations
 
 import base64
-import io
 import json
 import logging
+import os
 import sys
 import time
-import zipfile
 from dataclasses import dataclass
 from typing import Optional
 
-from enigma_challenges.solution_output import (
-    RESULT_JSON_FILENAME,
-    build_solution_result_zip,
-)
+from enigma_challenges.solution_output import build_solution_result_zip
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -113,11 +109,6 @@ def _configure_logging(level: int = logging.INFO) -> None:
     root.addHandler(stream_handler)
 
 
-def _build_solution_zip(result_text: str, output_text: str) -> bytes:
-    """Pack the mock solution artifacts into an in-memory zip."""
-    return build_solution_result_zip(result_text, extra_files={"output.txt": output_text})
-
-
 def _write_solution_output(zip_bytes: bytes) -> None:
     """Flush logs, emit the separator, then write base64-encoded zip bytes.
 
@@ -142,7 +133,8 @@ def main() -> int:
 
     log.info("Starting mock example solution (signed payload generator)")
 
-    sol = sign_mock_payload(_DEV_MOCK_ED25519_SEED_HEX)
+    key_hex = os.environ.get("ENIGMA_MOCK_PRIVATE_KEY") or _DEV_MOCK_ED25519_SEED_HEX
+    sol = sign_mock_payload(key_hex)
     doc = {
         "status": sol.status,
         "signature": sol.signature,
@@ -155,7 +147,16 @@ def main() -> int:
     log.info("Built signed solution payload (status=%s)", doc.get("status"))
     log.info("Emitting solution_artifacts zip on stdout after separator")
 
-    zip_bytes = _build_solution_zip(result_text=text, output_text=text)
+    solve_info = json.dumps(
+        {
+            "challenge_id": "mock",
+            "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "solution_status": sol.status,
+        }
+    )
+    zip_bytes = build_solution_result_zip(
+        text, solve_info=solve_info, extra_files={"output.txt": text}
+    )
 
     # IMPORTANT: No logging after this point! The solution output separator and
     # raw zip bytes are written to stdout; any subsequent text on stdout would

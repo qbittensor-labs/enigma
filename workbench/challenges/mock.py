@@ -23,13 +23,11 @@ from qbittensor.challenges.mock_challenge import (
 )
 
 
-# Default public key for the mock challenge. Validators use this to verify
-# signatures. The corresponding private key is held by the team and loaded
-# from the ENIGMA_MOCK_PRIVATE_KEY environment variable on the miner.
-#
-# Override with ENIGMA_MOCK_PUBLIC_KEY env var or --public-key flag if using
-# a different keypair.
-DEFAULT_PUBLIC_KEY = "27705e2d84ec5fb03bd247097afb356691592e7da30543f83efc9632f799d980"
+# Default public key for local workbench tests. Matches the baked-in Ed25519
+# seed in example_solution/mock_solution.py so `enigma-workbench test mock`
+# verifies without extra flags. Override with ENIGMA_MOCK_PUBLIC_KEY or
+# --public-key if you sign with a different key.
+DEFAULT_PUBLIC_KEY = "7b4e2f00b6d6ff2e338b42b2bf599201d285f1fddd4f7b3b99a824fdd36cc8dc"
 
 
 def _get_public_key(override: str | None = None) -> str:

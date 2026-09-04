@@ -27,13 +27,13 @@ Solutions are executed by validators under these conditions:
 - **Compute:** NVIDIA RTX PRO 6000 (96 GB VRAM), 24 vCPU, 85 GB RAM
 - **Filesystem:** Root filesystem is read-only. Use `/tmp` (tmpfs, currently sized to `VALIDATOR_DOCKER_TMPFS_DEFAULT` with noexec/nosuid) for any scratch space, temp files, or working directories needed at runtime.
 - **User:** Runs as a non-root user (default `miner`). Your Dockerfile should create this user and ensure your solver and any required binaries are accessible to it (see the example_solution/Dockerfile).
-- **Output contract:** In Docker/validator mode there is **no** writable `/output` volume mounted. Your solver must emit results exclusively via the stdout protocol (text logs, then the `SOLUTION_OUTPUT_SEPARATOR` line, then a base64-encoded zip of the files named by RESULT_JSON_FILENAME + SOLVE_INFO_JSON_FILENAME etc.). See `enigma_challenges/solution_output.py` (or the vendored copy at build time) for constants. The `OUTPUT_DIR` environment variable is only provided in direct (non-Docker) mode for local development convenience.
+- **Output contract:** No writable `/output` volume. Emit results on stdout (logs, then `SOLUTION_OUTPUT_SEPARATOR`, then a base64 zip of `result.json` / `solve_info.json`). See `qbittensor/challenges/solution_output.py`. `OUTPUT_DIR` is only set in `--mode direct`.
 
 ## Challenge parameters
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `difficulty` | Controls the bit-width of the semiprime to factor | 1 |
+| `difficulty` (workbench `--difficulty`) | Bit-width of the semiprime to factor | 300 |
 
 ## Input
 
@@ -86,7 +86,7 @@ Include the files named by SOLVE_INFO_JSON_FILENAME (and any other files your ch
 
 `container.log` (full logs) is captured automatically from the container output.
 
-See the example solver and `enigma_challenges/solution_output.py` (or the comment block in the mock example Dockerfile) for the exact protocol.
+See the example solver and `qbittensor/challenges/solution_output.py` for the protocol.
 
 ## Example
 
@@ -104,8 +104,8 @@ msieve SIQS) and includes a `Dockerfile` and `breaking_rsa.py` solver script.
 ## Testing
 
 ```bash
-python -m workbench test breaking-rsa --solution ./my_solver/
+enigma-workbench test breaking-rsa --solution ./my_solver/
 ```
 
-Use `--mode direct` to skip Docker and run your solver script directly.
-Use `--seed <int>` for reproducible challenge generation.
+`--mode direct` skips Docker. `--seed <int>` for a reproducible problem.
+Docker mode (the default) before submitting — [workbench README](../../README.md).

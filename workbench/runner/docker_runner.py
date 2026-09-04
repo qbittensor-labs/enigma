@@ -18,12 +18,10 @@
 import os
 import shutil
 import subprocess
-import tempfile
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from qbittensor.challenges.solution_output import extract_artifacts, split_on_separator
 
@@ -62,14 +60,6 @@ def check_docker() -> bool:
         return True
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return False
-
-
-def _find_challenges_package() -> str | None:
-    """Locate the challenges package (vendored as enigma_challenges for solution containers) relative to this file."""
-    # Walk up from workbench/runner/ to repo root
-    repo_root = Path(__file__).resolve().parent.parent.parent
-    pkg = repo_root / "qbittensor" / "challenges"
-    return str(pkg) if pkg.exists() else None
 
 
 def _inspect_image_size_bytes(image_name: str) -> int | None:
@@ -132,78 +122,87 @@ def _get_workbench_docker_args() -> list[str]:
                 os.environ[env_name] = original
 
 
-def build_image(solution_dir: str, challenge_type: str) -> RunResult:
-    """Build a Docker image from the solution directory.
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent.parent
 
-    Creates a temporary build context that includes both the solution
-    directory contents and the challenges package (laid out as 'enigma_challenges'
-    so that solution Dockerfiles and their imports continue to work).
+
+def challenges_package_src() -> Path:
+    return _repo_root() / "qbittensor" / "challenges"
+
+
+def ensure_enigma_challenges(solution_dir: str) -> tuple[Path, bool]:
+    """Copy ``qbittensor/challenges`` into ``solution_dir/enigma_challenges`` if missing.
+
+    Writes onto disk so the same directory can be zipped for the validator.
+    Returns ``(dest, copied)``. Raises ``ValueError`` if dest is a symlink or
+    the source package is missing.
     """
+    dest = Path(solution_dir).resolve() / "enigma_challenges"
+    if dest.is_symlink():
+        raise ValueError(
+            "enigma_challenges/ is a symlink. The validator will not follow a "
+            "host symlink in the zip. Replace it with a real directory."
+        )
+    if dest.is_dir():
+        return dest, False
+    src = challenges_package_src()
+    if not src.is_dir():
+        raise ValueError(f"Challenges package not found at {src}")
+    shutil.copytree(
+        src,
+        dest,
+        ignore=shutil.ignore_patterns("__pycache__", "*.egg-info", ".venv", "node_modules"),
+    )
+    return dest, True
+
+
+def docker_build_command(solution_dir: str, image_name: str) -> list[str]:
+    """Return ``docker build`` argv. Context is always the solution directory."""
+    return [
+        "docker", "build", "--platform", "linux/amd64",
+        "-t", image_name, str(Path(solution_dir).resolve()),
+    ]
+
+
+def build_image(solution_dir: str, challenge_type: str) -> RunResult:
+    """Build a Docker image from the solution directory (same as the validator)."""
     image_name = f"workbench-test-{challenge_type}"
     start = time.time()
 
-    challenges_pkg = _find_challenges_package()
-
     try:
-        # Build in a temp context that merges solution + challenges package
-        with tempfile.TemporaryDirectory(prefix="workbench-build-") as ctx:
-            # Copy solution contents into the build context
-            for item in Path(solution_dir).iterdir():
-                if item.is_symlink():
-                    continue
-                dest = Path(ctx) / item.name
-                if item.is_dir():
-                    def _no_symlinks(path: str, names: list[str]) -> list[str]:
-                        return [n for n in names if not os.path.islink(os.path.join(path, n))]
-                    shutil.copytree(item, dest, ignore=_no_symlinks)
-                else:
-                    shutil.copy2(item, dest)
+        result = subprocess.run(
+            docker_build_command(solution_dir, image_name),
+            capture_output=True, text=True, timeout=600,
+        )
+        duration = time.time() - start
 
-            # Copy challenges package if found; lay it out under the name expected by
-            # solution Dockerfiles (enigma_challenges top-level for their COPY + imports).
-            if challenges_pkg:
-                shutil.copytree(
-                    challenges_pkg,
-                    Path(ctx) / "enigma_challenges",
-                    ignore=shutil.ignore_patterns(
-                        "__pycache__", "*.egg-info", ".venv", "node_modules",
+        if result.returncode == 0:
+            # Enforce the same post-build image size limit the validator uses.
+            size_bytes = _inspect_image_size_bytes(image_name)
+            if size_bytes is not None and size_bytes > MAX_SOLUTION_DOCKER_IMAGE_SIZE_BYTES:
+                # Remove the oversized image (matches validator behavior in build_docker_image.py).
+                subprocess.run(
+                    ["docker", "rmi", "-f", image_name],
+                    capture_output=True, check=False
+                )
+                return RunResult(
+                    success=False,
+                    exit_code=result.returncode,
+                    log=(
+                        result.stdout + result.stderr +
+                        f"\n\n❌ Image size {size_bytes} bytes exceeds limit "
+                        f"{MAX_SOLUTION_DOCKER_IMAGE_SIZE_BYTES} bytes. "
+                        "Image removed. This solution would be rejected by the validator."
                     ),
+                    duration=duration,
                 )
 
-            result = subprocess.run(
-                ["docker", "build", "--platform", "linux/amd64",
-                 "-t", image_name, ctx],
-                capture_output=True, text=True, timeout=600,
-            )
-            duration = time.time() - start
-
-            if result.returncode == 0:
-                # Enforce the same post-build image size limit the validator uses.
-                size_bytes = _inspect_image_size_bytes(image_name)
-                if size_bytes is not None and size_bytes > MAX_SOLUTION_DOCKER_IMAGE_SIZE_BYTES:
-                    # Remove the oversized image (matches validator behavior in build_docker_image.py).
-                    subprocess.run(
-                        ["docker", "rmi", "-f", image_name],
-                        capture_output=True, check=False
-                    )
-                    return RunResult(
-                        success=False,
-                        exit_code=result.returncode,
-                        log=(
-                            result.stdout + result.stderr +
-                            f"\n\n❌ Image size {size_bytes} bytes exceeds limit "
-                            f"{MAX_SOLUTION_DOCKER_IMAGE_SIZE_BYTES} bytes. "
-                            "Image removed. This solution would be rejected by the validator."
-                        ),
-                        duration=duration,
-                    )
-
-            return RunResult(
-                success=result.returncode == 0,
-                exit_code=result.returncode,
-                log=result.stdout + result.stderr,
-                duration=duration,
-            )
+        return RunResult(
+            success=result.returncode == 0,
+            exit_code=result.returncode,
+            log=result.stdout + result.stderr,
+            duration=duration,
+        )
     except subprocess.TimeoutExpired:
         return RunResult(
             success=False, exit_code=-1,

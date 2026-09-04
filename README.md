@@ -27,7 +27,7 @@ By leveraging Bittensor's incentive layer, Enigma turns critical security resear
 ## How Enigma Works
 
 1. **Challenges are posted** with funded prize pools in SN63 Alpha. Each challenge is developed and launched in collaboration with a high-profile collaborator with expertise in the field — Terra Quantum for Breaking RSA, BlueQubit for Hardening Quantum Proof.
-2. **Participants compete** by submitting verified solutions (source code, not just answers). Unlimited resubmissions allowed; each submission carries a small TAO fee. See [Miner Setup](#miner-setup) for how to submit.
+2. **Participants compete** by submitting verified solutions (source code, not just answers). Unlimited resubmissions allowed; each submission carries a small TAO fee. Test on the [workbench](workbench/README.md) first — [Miner Setup](#miner-setup).
 3. **Validators** score and verify solutions. A dedicated mechanism directs *all* miner emissions into the Treasury Wallet so they can accumulate into prize pools. Validators later vote on any disbursement.
 4. **Winner takes all** — the first valid solution drains the prize. Proof is on-chain.
 5. **Code is published** as open source after verification, becoming the starting point for the next attempt.
@@ -97,7 +97,7 @@ Developed and launched in collaboration with [Terra Quantum](https://terraquantu
 
 Factor large semiprimes to break RSA encryption. Solutions run in Docker containers on validator hardware (NVIDIA RTX PRO 6000, 24 vCPU, 85 GB RAM, `--network none`, `linux/amd64`) with a 4-hour wall time.
 
-See the [Breaking RSA challenge README](workbench/challenges/breaking_rsa/README.md) for details, and the [Miner Guide](qbittensor/miner/README.md) for submission instructions.
+See the [Breaking RSA challenge README](workbench/challenges/breaking_rsa/README.md), [workbench](workbench/README.md), and [Miner Guide](qbittensor/miner/README.md).
 
 ### Hardening Quantum Proof — Live
 
@@ -105,7 +105,7 @@ Developed and launched in collaboration with [BlueQubit](https://www.bluequbit.i
 
 Given a quantum circuit, find the peaked state — the output with a disproportionately high measurement probability. Peaked circuits can serve as quantum proofs: verifiable tests that a real quantum computer can solve but a classical system cannot. If classical solvers can crack them, the proof doesn't hold.
 
-See the [Hardening Quantum Proof challenge README](workbench/challenges/hardening_quantum_proof/README.md) for details, and the [Miner Guide](qbittensor/miner/README.md) for submission instructions.
+See the [Hardening Quantum Proof challenge README](workbench/challenges/hardening_quantum_proof/README.md), [workbench](workbench/README.md), and [Miner Guide](qbittensor/miner/README.md).
 
 ### Breaking Treasury Wallets — Closed
 
@@ -171,7 +171,9 @@ To bind the validator to a specific GPU, use the `--neuron.device` flag (see the
 
 ## Miner Setup
 
-See the dedicated miner operator guide:
+Test on the [workbench](workbench/README.md) in Docker mode before you submit
+(`enigma-workbench test <challenge> --solution <your_dir>`). Zip that same
+directory (`test`/`build` copy `enigma_challenges/` into it if missing).
 
 **→ [qbittensor/miner/README.md](qbittensor/miner/README.md)**
 

@@ -16,20 +16,26 @@
 # DEALINGS IN THE SOFTWARE.
 
 import os
+import shutil
 import subprocess
+import sys
+import tempfile
 import time
 from pathlib import Path
 
-from qbittensor.challenges.solution_output import SOLUTION_LOG_FILENAME
+from qbittensor.challenges.solution_output import (
+    SOLUTION_LOG_FILENAME,
+    extract_artifacts,
+    split_on_separator,
+)
 from .docker_runner import RunResult
-
-from qbittensor.challenges.solution_output import SOLUTION_OUTPUT_SEPARATOR
 
 
 def find_entry_point(
     solution_dir: str,
     challenge_type: str,
     entry_point: str | None = None,
+    names: list[str] | None = None,
 ) -> str | None:
     """Find the solver script in the solution directory."""
     if entry_point:
@@ -39,10 +45,11 @@ def find_entry_point(
     defaults = {
         "breaking_rsa": ["breaking_rsa.py"],
         "hardening_quantum_proof": ["hardening_quantum_proof.py"],
-        "mock": ["mock_solver.py"],
+        "mock": ["mock_solution.py"],
     }
+    candidates = names or defaults.get(challenge_type, [f"{challenge_type}.py"])
 
-    for name in defaults.get(challenge_type, []):
+    for name in candidates:
         path = Path(solution_dir) / name
         if path.exists():
             return str(path)
@@ -63,39 +70,33 @@ def run_direct(
     env = os.environ.copy()
     env["OUTPUT_DIR"] = output_dir
 
-    # In Docker, the challenges package is vendored as 'enigma_challenges'.
-    # For direct mode, create a temporary symlink so the same import works.
-    repo_root = Path(__file__).resolve().parent.parent.parent
-    challenges_pkg = repo_root / "qbittensor" / "challenges"
+    # Solvers import `enigma_challenges`. `test`/`build` copy that package
+    # into the solution dir when missing; this is a fallback for direct mode.
+    solution_dir = Path(script_path).resolve().parent
+    local_pkg = solution_dir / "enigma_challenges"
     symlink_dir = None
-    symlink_path = None
-    if challenges_pkg.is_dir():
-        import tempfile
-        symlink_dir = tempfile.mkdtemp(prefix="workbench-pypath-")
-        symlink_path = Path(symlink_dir) / "enigma_challenges"
-        symlink_path.symlink_to(challenges_pkg)
-        # Prepend so the solver finds enigma_challenges
-        env["PYTHONPATH"] = symlink_dir + os.pathsep + env.get("PYTHONPATH", "")
+    if local_pkg.is_dir():
+        env["PYTHONPATH"] = str(solution_dir) + os.pathsep + env.get("PYTHONPATH", "")
+    else:
+        repo_pkg = Path(__file__).resolve().parent.parent.parent / "qbittensor" / "challenges"
+        if repo_pkg.is_dir():
+            symlink_dir = tempfile.mkdtemp(prefix="workbench-pypath-")
+            Path(symlink_dir, "enigma_challenges").symlink_to(repo_pkg)
+            env["PYTHONPATH"] = symlink_dir + os.pathsep + env.get("PYTHONPATH", "")
 
     start = time.time()
     try:
         result = subprocess.run(
-            ["python", script_path, challenge_id, problem_json],
-            capture_output=True, text=True, timeout=timeout, env=env,
+            [sys.executable, script_path, challenge_id, problem_json],
+            capture_output=True, timeout=timeout, env=env,
         )
         duration = time.time() - start
 
-        # Strip the solution output separator + base64 payload from log display.
-        # In direct mode the solver also writes files to OUTPUT_DIR, so we only
-        # need the text portion for the log.
-        log_text = result.stdout
-        sep_str = SOLUTION_OUTPUT_SEPARATOR.decode("utf-8", errors="replace")
-        sep_idx = log_text.find(sep_str)
-        if sep_idx != -1:
-            log_text = log_text[:sep_idx]
-        log_text += result.stderr
+        combined = (result.stdout or b"") + (result.stderr or b"")
+        extract_artifacts(combined, output_dir)
+        logs_bytes, _, _ = split_on_separator(combined)
+        log_text = logs_bytes.decode("utf-8", errors="replace")
 
-        # Write SOLUTION_LOG_FILENAME
         log_path = os.path.join(output_dir, SOLUTION_LOG_FILENAME)
         if not os.path.exists(log_path):
             with open(log_path, "w") as f:
@@ -121,5 +122,4 @@ def run_direct(
         )
     finally:
         if symlink_dir:
-            import shutil
             shutil.rmtree(symlink_dir, ignore_errors=True)
