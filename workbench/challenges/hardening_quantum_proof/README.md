@@ -146,13 +146,12 @@ your solver never sees the answer.
 | `d1_s2_adeddcf3` | 1 | 48 | Representative difficulty 1 circuit |
 | `d2_s1_39b370e4` | 2 | 40 | Representative difficulty 2 circuit |
 | `d2_s2_1efabaf4` | 2 | 44 | Representative difficulty 2 circuit |
+| `d3_s1_2674779a` | 3 | 48 | Representative difficulty 3 circuit |
+| `d3_s2_c09ba537` | 3 | 48 | Representative difficulty 3 circuit |
 
 ```bash
-# List all available sample circuits
-python -m workbench samples
-
-# Filter by difficulty
-python -m workbench samples --difficulty 1
+enigma-workbench samples
+enigma-workbench samples --difficulty 1
 ```
 
 ## Example solution
@@ -166,25 +165,20 @@ sophisticated simulation techniques or hardware acceleration.
 ## Testing
 
 ```bash
-# Smoke test with the trivial circuit (instant, any machine)
-python -m workbench test hardening-quantum-proof --difficulty 0 \
+# Smoke test (trivial circuit)
+enigma-workbench test hardening-quantum-proof --difficulty 0 \
     --solution workbench/challenges/hardening_quantum_proof/example_solution \
     --mode direct
 
-# Docker mode (matches validator constraints)
-python -m workbench test hardening-quantum-proof --difficulty 0 \
-    --solution workbench/challenges/hardening_quantum_proof/example_solution \
-    --mode docker
+# Docker mode (default; use this before submitting)
+enigma-workbench test hardening-quantum-proof --difficulty 0 \
+    --solution workbench/challenges/hardening_quantum_proof/example_solution
 
-# Test with a specific sample circuit
-python -m workbench test hardening-quantum-proof --circuit d1_s1_4043cafb \
-    --solution ./my_solver/ --mode direct
+enigma-workbench test hardening-quantum-proof --circuit d1_s1_4043cafb \
+    --solution ./my_solver/
 
-# Test your own solver directory
-python -m workbench test hardening-quantum-proof --difficulty 1 \
+enigma-workbench test hardening-quantum-proof --difficulty 1 \
     --solution ./my_solver/
 ```
 
-Use `--mode direct` to skip Docker during development. Always test with
-`--mode docker` (the default) before submitting, as this applies the same
-constraints the validator will enforce.
+[Workbench README](../../README.md).

@@ -73,6 +73,7 @@ setup(
     entry_points={
         "console_scripts": [
             "check-validation = qbittensor.cli.validator.check_validation:main",
+            "enigma-workbench = workbench.cli:cli",
             "mine-enigma = qbittensor.cli.miner.mine_enigma:main",
         ],
     },

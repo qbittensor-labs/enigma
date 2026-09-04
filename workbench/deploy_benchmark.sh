@@ -41,8 +41,9 @@ echo "Packaging benchmark..."
 # Workbench CLI + runner
 cp -r workbench "$DEST/workbench"
 
-# challenges package (vendored under 'enigma_challenges' name for benchmark layout + solution imports)
-cp -r qbittensor/challenges "$DEST/enigma_challenges"
+# Challenges package at the same repo-relative path example Dockerfiles COPY
+mkdir -p "$DEST/qbittensor"
+cp -r qbittensor/challenges "$DEST/qbittensor/challenges"
 
 # Clean up __pycache__ and egg-info
 find "$DEST" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
@@ -140,12 +141,6 @@ if ! "$PYTHON_BIN" -c "import click, gmpy2, cryptography" 2>/dev/null; then
 fi
 echo "Dependencies: OK"
 echo ""
-
-# Symlink (or ensure) the vendored challenges package is available as 'enigma_challenges' for PYTHONPATH/import
-CHALLENGES_PKG="$SCRIPT_DIR/enigma_challenges"
-if [[ -d "$CHALLENGES_PKG" ]]; then
-    ln -sf "$CHALLENGES_PKG" "$SCRIPT_DIR/enigma_challenges"
-fi
 
 # --- CSV header ---------------------------------------------------------------
 

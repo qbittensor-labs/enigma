@@ -1,5 +1,6 @@
 async-substrate-interface>=1.0
 bittensor==11.0.1
+click>=8.0
 cryptography>=42.0
 fastapi>=0.110.1
 gmpy2>=2.2.0

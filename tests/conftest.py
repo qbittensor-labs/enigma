@@ -15,10 +15,8 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -82,33 +80,21 @@ def docker_daemon():
 
 @pytest.fixture(scope="session")
 def mock_solution_image(docker_daemon):
-    challenges = ROOT / "qbittensor" / "challenges"
-    with tempfile.TemporaryDirectory(prefix="enigma-pytest-mock-") as ctx:
-        ctx_path = Path(ctx)
-        for item in MOCK_SOLUTION_DOCKER_CONTEXT.iterdir():
-            dest = ctx_path / item.name
-            if item.is_dir():
-                shutil.copytree(item, dest, ignore=shutil.ignore_patterns("__pycache__"))
-            else:
-                shutil.copy2(item, dest)
-        if challenges.is_dir():
-            shutil.copytree(
-                challenges,
-                ctx_path / "enigma_challenges",
-                ignore=shutil.ignore_patterns("__pycache__", "*.egg-info", ".venv"),
-            )
-        build = subprocess.run(
-            [
-                "docker",
-                "build",
-                "-t",
-                MOCK_SOLUTION_TEST_IMAGE,
-                str(ctx_path),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
+    from workbench.runner.docker_runner import ensure_enigma_challenges
+
+    ensure_enigma_challenges(str(MOCK_SOLUTION_DOCKER_CONTEXT))
+    build = subprocess.run(
+        [
+            "docker",
+            "build",
+            "-t",
+            MOCK_SOLUTION_TEST_IMAGE,
+            str(MOCK_SOLUTION_DOCKER_CONTEXT),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
     if build.returncode != 0:
         pytest.fail(
             "Failed to build mock_solution image:\n"

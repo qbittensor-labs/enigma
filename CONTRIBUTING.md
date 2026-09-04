@@ -29,7 +29,7 @@ pip install -e .
 **This step is critical.** The editable install:
 
 - Makes the `qbittensor` package importable from your source checkout.
-- Registers console scripts (e.g. `check-validation`).
+- Registers console scripts (`enigma-workbench`, `mine-enigma`, `check-validation`).
 - Ensures local code changes take effect immediately without reinstalls.
 - Is required for correct resolution of local data directories and database paths when running neurons or CLIs.
 

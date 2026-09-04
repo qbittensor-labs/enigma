@@ -15,7 +15,6 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-import json
 import os
 import shutil
 import sys
@@ -26,11 +25,19 @@ from pathlib import Path
 
 import click
 
-from workbench.challenges import breaking_rsa as breaking_rsa_challenge
 from workbench.challenges import hardening_quantum_proof as hqp_challenge
-from workbench.challenges import mock as mock_challenge
+from workbench.challenges.registry import (
+    ChallengeSpec,
+    extra_challenge_names,
+    get_spec,
+    shipped_slugs,
+)
 from workbench.runner.docker_runner import (
-    check_docker, build_image, run_container, DEFAULT_WALL_TIME,
+    DEFAULT_WALL_TIME,
+    build_image,
+    check_docker,
+    ensure_enigma_challenges,
+    run_container,
 )
 
 # Best-effort host NVIDIA/CUDA version for local developer visibility
@@ -41,7 +48,6 @@ except Exception:
     _get_nvidia_driver_info = None  # type: ignore
 from workbench.runner.direct_runner import find_entry_point, run_direct
 from workbench.validator import validate_output, validate_dockerfile_security
-from workbench.verifier import verify_breaking_rsa, verify_hardening_quantum_proof, verify_mock
 from workbench.report import print_report
 
 from qbittensor.challenges.solution_output import RESULT_JSON_FILENAME
@@ -52,43 +58,6 @@ def _prepare_challenge_input_dir(workspace: str) -> str:
     mount_dir = os.path.join(workspace, "challenge_input_mount")
     os.makedirs(mount_dir, mode=0o755, exist_ok=True)
     return mount_dir
-
-
-def _write_breaking_rsa_challenge_input(mount_dir: str, problem) -> None:
-    """Write challenge_input.json matching validator breaking_rsa_setup."""
-    path = os.path.join(mount_dir, "challenge_input.json")
-    with open(path, "w") as f:
-        json.dump(problem.to_dict(), f)
-
-
-def _write_hqp_challenge_input(
-    mount_dir: str,
-    challenge_id: str,
-    difficulty: int,
-    host_qasm_path: str,
-) -> None:
-    """Write circuit.qasm + challenge_input.json matching validator hqp_setup."""
-    qasm_dest = os.path.join(mount_dir, "circuit.qasm")
-    shutil.copy2(host_qasm_path, qasm_dest)
-
-    challenge_input = {
-        "challenge_id": challenge_id,
-        "difficulty": difficulty,
-        "qasm_file": "/challenge_input/circuit.qasm",
-    }
-    path = os.path.join(mount_dir, "challenge_input.json")
-    with open(path, "w") as f:
-        json.dump(challenge_input, f)
-
-
-def _write_mock_challenge_input(mount_dir: str) -> None:
-    """Write challenge_input.txt matching validator mock_solution_setup."""
-    path = os.path.join(mount_dir, "challenge_input.txt")
-    with open(path, "w") as f:
-        f.write(
-            "This is a simple solution setup file. "
-            "The output should include the word 'Hello'. Hello!"
-        )
 
 
 def _warn_non_default(wall_time, allow_network):
@@ -125,6 +94,17 @@ def _preflight_dockerfile(solution: str) -> None:
         sys.exit(1)
 
 
+def _ensure_challenges(solution: str) -> None:
+    """Copy qbittensor/challenges into solution/enigma_challenges if missing."""
+    try:
+        dest, copied = ensure_enigma_challenges(solution)
+    except ValueError as e:
+        click.echo(f"Error: {e}")
+        sys.exit(1)
+    if copied:
+        click.echo(f"Copied qbittensor/challenges -> {dest}")
+
+
 def _print_nvidia_info_if_available() -> None:
     """Print host NVIDIA driver + CUDA version (if detectable) for local debugging.
 
@@ -142,302 +122,144 @@ def _print_nvidia_info_if_available() -> None:
         pass
 
 
-@click.group()
+class WorkbenchGroup(click.Group):
+    """``run`` is an alias of ``test``."""
+
+    def get_command(self, ctx, cmd_name):
+        if cmd_name == "run":
+            cmd_name = "test"
+        return super().get_command(ctx, cmd_name)
+
+    def list_commands(self, ctx):
+        names = super().list_commands(ctx)
+        if "test" in names and "run" not in names:
+            names = list(names)
+            names.insert(names.index("test") + 1, "run")
+        return names
+
+
+@click.group(cls=WorkbenchGroup)
 def cli():
     """Enigma Developer Workbench -- local testing tool for challenge solutions."""
     pass
 
 
-@cli.group()
-def test():
-    """Test a solution against a challenge."""
-    pass
+def _resolve_spec(name: str) -> ChallengeSpec:
+    spec = get_spec(name)
+    if spec is not None:
+        return spec
+    extras = extra_challenge_names()
+    extra_note = ""
+    if extras:
+        extra_note = (
+            f"\nAlso found on disk (no workbench handler yet): {', '.join(extras)}"
+        )
+    raise click.UsageError(
+        f"Unknown challenge {name!r}. "
+        f"Shipped: {', '.join(shipped_slugs())}."
+        f"{extra_note}\n"
+        "See `enigma-workbench challenges`."
+    )
 
 
-@test.command("breaking-rsa")
-@click.option("--difficulty", default=300, help="Bit-width of the semiprime to factor (default: 300)")
+def _docker_preflight(solution: str, wall_time, allow_network) -> None:
+    if not check_docker():
+        click.echo("Error: Docker is not available. Install Docker or use --mode direct.")
+        sys.exit(1)
+    _preflight_dockerfile(solution)
+    _print_nvidia_info_if_available()
+    _warn_non_default(wall_time, allow_network)
+
+
+@cli.command("test")
+@click.argument("challenge")
 @click.option("--solution", required=True, type=click.Path(exists=True), help="Path to solution directory")
 @click.option("--mode", type=click.Choice(["docker", "direct"]), default="docker", help="Execution mode")
-@click.option("--seed", type=int, default=None, help="Random seed for reproducibility")
+@click.option("--difficulty", type=int, default=None, help="Challenge difficulty (meaning varies by challenge)")
+@click.option("--seed", type=int, default=None, help="Random seed (Breaking RSA)")
+@click.option("--circuit", default=None, help="Sample circuit ID (Hardening Quantum Proof)")
+@click.option("--private-key", default=None, help="Ed25519 private key hex (mock)")
+@click.option("--public-key", default=None, help="Ed25519 public key hex (mock)")
 @click.option("--wall-time", default=DEFAULT_WALL_TIME, help=f"Wall time in seconds (default: {DEFAULT_WALL_TIME} = {DEFAULT_WALL_TIME // 3600}h, matches validator)")
 @click.option("--allow-network", is_flag=True, help="Allow network access in container (validator disables network)")
 @click.option("--keep-output", is_flag=True, help="Keep output directory after test")
-def test_breaking_rsa(difficulty, solution, mode, seed, wall_time, allow_network, keep_output):
-    """Test a Breaking RSA solution."""
+def test_cmd(
+    challenge, solution, mode, difficulty, seed, circuit, private_key, public_key,
+    wall_time, allow_network, keep_output,
+):
+    """Generate a challenge, build/run the solver, validate and verify.
+
+    CHALLENGE is a slug from workbench/challenges/ (breaking-rsa,
+    hardening-quantum-proof, mock). Underscores and aliases work too.
+
+    Alias: enigma-workbench run CHALLENGE ...
+    """
+    spec = _resolve_spec(challenge)
+    if difficulty is None:
+        difficulty = spec.default_difficulty
+
+    _ensure_challenges(solution)
     total_start = time.time()
-
-    # Check prerequisites
     if mode == "docker":
-        if not check_docker():
-            click.echo("Error: Docker is not available. Install Docker or use --mode direct.")
-            sys.exit(1)
-        _preflight_dockerfile(solution)
-        _print_nvidia_info_if_available()
-        _warn_non_default(wall_time, allow_network)
+        _docker_preflight(solution, wall_time, allow_network)
 
-    # Generate challenge — difficulty is the bit-width
     try:
-        problem, verif, seed_used = breaking_rsa_challenge.generate_breaking_rsa(difficulty, difficulty, seed)
+        prepared = spec.prepare(
+            difficulty=difficulty,
+            seed=seed,
+            circuit=circuit,
+            private_key=private_key,
+            public_key=public_key,
+        )
+    except (ValueError, FileNotFoundError) as e:
+        click.echo(f"Error: {e}")
+        sys.exit(1)
     except Exception as e:
         click.echo(f"Error generating challenge: {e}")
         sys.exit(1)
 
     challenge_id = str(uuid.uuid4())
-    problem_json = problem.to_json()
-
-    problem_summary = {
-        "Difficulty: ": difficulty,
-        "Problem:    ": problem_json,
-    }
-
-    # Workspace holds output + challenge_input_mount (Docker parity with validator)
     workspace = tempfile.mkdtemp(prefix="workbench-")
     output_dir = os.path.join(workspace, "output")
     os.makedirs(output_dir, exist_ok=True)
 
     build_result = None
     run_result = None
+    success = False
 
     try:
         if mode == "docker":
-            build_result = build_image(solution, "breaking_rsa")
+            build_result = build_image(solution, prepared.type_id)
             if not build_result.success:
                 print_report(
-                    "breaking_rsa", mode, seed_used, problem_summary,
+                    prepared.type_id, mode, prepared.seed_used, prepared.problem_summary,
                     build_result=build_result,
                     total_time=time.time() - total_start,
                 )
                 sys.exit(1)
 
             mount_dir = _prepare_challenge_input_dir(workspace)
-            _write_breaking_rsa_challenge_input(mount_dir, problem)
+            prepared.write_input(mount_dir)
             run_result = run_container(
-                "breaking_rsa", mount_dir, output_dir,
-                timeout=wall_time, network=allow_network,
-            )
-        else:
-            entry = find_entry_point(solution, "breaking_rsa")
-            if not entry:
-                click.echo(f"Error: No solver script found in {solution}. Expected breaking_rsa.py.")
-                sys.exit(1)
-            run_result = run_direct(entry, challenge_id, problem_json, output_dir, wall_time)
-
-        # Validate
-        validation_results = validate_output(
-            output_dir, "breaking_rsa",
-            check_dockerfile=(mode == "docker"),
-            solution_dir=solution,
-        )
-
-        # Verify if validation passed
-        verify_result = None
-        schema_ok = all(c.passed for c in validation_results)
-        if schema_ok:
-            from qbittensor.challenges.breaking_rsa import Solution
-            result_path = Path(os.path.join(output_dir, RESULT_JSON_FILENAME))
-            sol = Solution.from_json_file(result_path)
-            verify_result = verify_breaking_rsa(problem, sol, verif)
-
-        total_time = time.time() - total_start
-        success = print_report(
-            "breaking_rsa", mode, seed_used, problem_summary,
-            build_result=build_result, run_result=run_result,
-            validation_results=validation_results,
-            verify_result=verify_result,
-            total_time=total_time,
-        )
-
-    finally:
-        if keep_output:
-            click.echo(f"Output kept at: {output_dir}")
-            click.echo(f"Workspace kept at: {workspace}")
-        else:
-            shutil.rmtree(workspace, ignore_errors=True)
-
-    sys.exit(0 if success else 1)
-
-
-@test.command("hardening-quantum-proof")
-@click.option("--difficulty", default=1, help="Difficulty label (default: 1)")
-@click.option("--solution", required=True, type=click.Path(exists=True), help="Path to solution directory")
-@click.option("--mode", type=click.Choice(["docker", "direct"]), default="docker", help="Execution mode")
-@click.option("--circuit", default=None, help="Sample circuit ID (default: random)")
-@click.option("--wall-time", default=DEFAULT_WALL_TIME, help=f"Wall time in seconds (default: {DEFAULT_WALL_TIME} = {DEFAULT_WALL_TIME // 3600}h, matches validator)")
-@click.option("--allow-network", is_flag=True, help="Allow network access in container (validator disables network)")
-@click.option("--keep-output", is_flag=True, help="Keep output directory after test")
-def test_hardening_quantum_proof(difficulty, solution, mode, circuit, wall_time, allow_network, keep_output):
-    """Test a Hardening Quantum Proof solution."""
-    total_start = time.time()
-
-    if mode == "docker":
-        if not check_docker():
-            click.echo("Error: Docker is not available. Install Docker or use --mode direct.")
-            sys.exit(1)
-        _preflight_dockerfile(solution)
-        _print_nvidia_info_if_available()
-        _warn_non_default(wall_time, allow_network)
-
-    try:
-        problem, verif, circuit_id = hqp_challenge.load_sample_circuit(circuit, difficulty)
-    except FileNotFoundError as e:
-        click.echo(f"Error: {e}")
-        sys.exit(1)
-
-    challenge_id = str(uuid.uuid4())
-    problem_json = problem.to_json()
-
-    problem_summary = {
-        "Circuit:    ": circuit_id,
-        "Difficulty: ": difficulty,
-        "Qubits:     ": len(verif.peaked_state),
-    }
-
-    workspace = tempfile.mkdtemp(prefix="workbench-")
-    output_dir = os.path.join(workspace, "output")
-    os.makedirs(output_dir, exist_ok=True)
-
-    build_result = None
-    run_result = None
-
-    try:
-        if mode == "docker":
-            build_result = build_image(solution, "hardening_quantum_proof")
-            if not build_result.success:
-                print_report(
-                    "hardening_quantum_proof", mode, 0, problem_summary,
-                    build_result=build_result,
-                    total_time=time.time() - total_start,
-                )
-                sys.exit(1)
-
-            mount_dir = _prepare_challenge_input_dir(workspace)
-            _write_hqp_challenge_input(
-                mount_dir, challenge_id, problem.difficulty, problem.qasm_file,
-            )
-            run_result = run_container(
-                "hardening_quantum_proof", mount_dir, output_dir,
-                timeout=wall_time, network=allow_network,
-            )
-        else:
-            entry = find_entry_point(solution, "hardening_quantum_proof")
-            if not entry:
-                click.echo(f"Error: No solver script found in {solution}. Expected hardening_quantum_proof.py.")
-                sys.exit(1)
-            run_result = run_direct(entry, challenge_id, problem_json, output_dir, wall_time)
-
-        validation_results = validate_output(
-            output_dir, "hardening_quantum_proof",
-            check_dockerfile=(mode == "docker"),
-            solution_dir=solution,
-        )
-
-        verify_result = None
-        schema_ok = all(c.passed for c in validation_results)
-        if schema_ok:
-            from qbittensor.challenges.hardening_quantum_proof import Solution
-            result_path = Path(os.path.join(output_dir, RESULT_JSON_FILENAME))
-            sol = Solution.from_json_file(result_path)
-            verify_result = verify_hardening_quantum_proof(problem, sol, verif)
-
-        total_time = time.time() - total_start
-        success = print_report(
-            "hardening_quantum_proof", mode, 0, problem_summary,
-            build_result=build_result, run_result=run_result,
-            validation_results=validation_results,
-            verify_result=verify_result,
-            total_time=total_time,
-        )
-
-    finally:
-        if keep_output:
-            click.echo(f"Output kept at: {output_dir}")
-            click.echo(f"Workspace kept at: {workspace}")
-        else:
-            shutil.rmtree(workspace, ignore_errors=True)
-
-    sys.exit(0 if success else 1)
-
-
-@test.command("mock")
-@click.option("--difficulty", default=1, help="Difficulty label (default: 1)")
-@click.option("--solution", required=True, type=click.Path(exists=True), help="Path to solution directory")
-@click.option("--mode", type=click.Choice(["docker", "direct"]), default="docker", help="Execution mode")
-@click.option("--private-key", default=None, help="Ed25519 private key (hex). Defaults to ENIGMA_MOCK_PRIVATE_KEY env var.")
-@click.option("--public-key", default=None, help="Ed25519 public key (hex). Defaults to built-in key.")
-@click.option("--wall-time", default=DEFAULT_WALL_TIME, help=f"Wall time in seconds (default: {DEFAULT_WALL_TIME} = {DEFAULT_WALL_TIME // 3600}h, matches validator)")
-@click.option("--allow-network", is_flag=True, help="Allow network access in container (validator disables network)")
-@click.option("--keep-output", is_flag=True, help="Keep output directory after test")
-def test_mock(difficulty, solution, mode, private_key, public_key, wall_time, allow_network, keep_output):
-    """Test the mock (plumbing test) challenge."""
-    total_start = time.time()
-
-    if mode == "docker":
-        if not check_docker():
-            click.echo("Error: Docker is not available. Install Docker or use --mode direct.")
-            sys.exit(1)
-        _preflight_dockerfile(solution)
-        _print_nvidia_info_if_available()
-        _warn_non_default(wall_time, allow_network)
-
-    # Resolve private key
-    priv_key = private_key or os.environ.get("ENIGMA_MOCK_PRIVATE_KEY")
-    if not priv_key:
-        click.echo(
-            "Error: Private key required. Set ENIGMA_MOCK_PRIVATE_KEY env var "
-            "or pass --private-key."
-        )
-        sys.exit(1)
-
-    # Generate challenge (needs public key for verification)
-    try:
-        problem, verif = mock_challenge.generate_mock(difficulty, public_key_hex=public_key)
-    except ValueError as e:
-        click.echo(f"Error: {e}")
-        sys.exit(1)
-
-    challenge_id = str(uuid.uuid4())
-    problem_json = problem.to_json()
-
-    problem_summary = {
-        "Difficulty: ": difficulty,
-        "Public key: ": verif.public_key_hex[:16] + "...",
-    }
-
-    workspace = tempfile.mkdtemp(prefix="workbench-")
-    output_dir = os.path.join(workspace, "output")
-    os.makedirs(output_dir, exist_ok=True)
-
-    build_result = None
-    run_result = None
-
-    try:
-        if mode == "docker":
-            build_result = build_image(solution, "mock")
-            if not build_result.success:
-                print_report(
-                    "mock", mode, 0, problem_summary,
-                    build_result=build_result,
-                    total_time=time.time() - total_start,
-                )
-                sys.exit(1)
-
-            mount_dir = _prepare_challenge_input_dir(workspace)
-            _write_mock_challenge_input(mount_dir)
-            run_result = run_container(
-                "mock", mount_dir, output_dir,
+                prepared.type_id, mount_dir, output_dir,
                 timeout=wall_time,
-                env_vars={"ENIGMA_MOCK_PRIVATE_KEY": priv_key},
+                env_vars=prepared.env_vars,
                 network=allow_network,
             )
         else:
-            entry = find_entry_point(solution, "mock")
+            entry = find_entry_point(
+                solution, prepared.type_id, names=prepared.entry_points,
+            )
             if not entry:
-                click.echo(f"Error: No solver script found in {solution}. Expected mock_solver.py.")
+                expected = " or ".join(prepared.entry_points)
+                click.echo(f"Error: No solver script found in {solution}. Expected {expected}.")
                 sys.exit(1)
-            run_result = run_direct(entry, challenge_id, problem_json, output_dir, wall_time)
+            run_result = run_direct(
+                entry, challenge_id, prepared.problem_json, output_dir, wall_time,
+            )
 
         validation_results = validate_output(
-            output_dir, "mock",
+            output_dir, prepared.type_id,
             check_dockerfile=(mode == "docker"),
             solution_dir=solution,
         )
@@ -445,20 +267,17 @@ def test_mock(difficulty, solution, mode, private_key, public_key, wall_time, al
         verify_result = None
         schema_ok = all(c.passed for c in validation_results)
         if schema_ok:
-            from qbittensor.challenges.mock_challenge import Solution
             result_path = Path(os.path.join(output_dir, RESULT_JSON_FILENAME))
-            sol = Solution.from_json_file(result_path)
-            verify_result = verify_mock(problem, sol, verif)
+            sol = prepared.load_solution(result_path)
+            verify_result = prepared.verify(prepared.problem, sol, prepared.verif)
 
-        total_time = time.time() - total_start
         success = print_report(
-            "mock", mode, 0, problem_summary,
+            prepared.type_id, mode, prepared.seed_used, prepared.problem_summary,
             build_result=build_result, run_result=run_result,
             validation_results=validation_results,
             verify_result=verify_result,
-            total_time=total_time,
+            total_time=time.time() - total_start,
         )
-
     finally:
         if keep_output:
             click.echo(f"Output kept at: {output_dir}")
@@ -467,6 +286,47 @@ def test_mock(difficulty, solution, mode, private_key, public_key, wall_time, al
             shutil.rmtree(workspace, ignore_errors=True)
 
     sys.exit(0 if success else 1)
+
+
+@cli.command("build")
+@click.option("--solution", required=True, type=click.Path(exists=True), help="Path to solution directory")
+@click.option("--challenge", default=None, help="Challenge slug for the image tag (default: directory name)")
+def build_cmd(solution, challenge):
+    """Docker-build a solution image without generating or running a challenge.
+
+    Use this to iterate on the Dockerfile. Full validator-shaped checking is
+    still `enigma-workbench test CHALLENGE --solution ...`.
+    """
+    _ensure_challenges(solution)
+    _docker_preflight(solution, DEFAULT_WALL_TIME, False)
+    if challenge:
+        type_id = _resolve_spec(challenge).type_id
+    else:
+        type_id = Path(solution).resolve().name.replace("-", "_")
+    result = build_image(solution, type_id)
+    click.echo(result.log)
+    if result.success:
+        click.echo(f"\nBuilt workbench-test-{type_id} in {result.duration:.1f}s")
+        sys.exit(0)
+    click.echo(f"\nBuild failed (exit {result.exit_code}) after {result.duration:.1f}s")
+    sys.exit(1)
+
+
+@cli.command("challenges")
+def challenges_cmd():
+    """List challenge slugs `test` / `run` accept."""
+    click.echo("Shipped:")
+    for spec in (get_spec(s) for s in shipped_slugs()):
+        assert spec is not None
+        click.echo(f"  {spec.slug:<28} {spec.help}")
+        if spec.extra_flags:
+            click.echo(f"  {'':<28} {spec.extra_flags}")
+    extras = extra_challenge_names()
+    if extras:
+        click.echo("On disk, no handler:")
+        for name in extras:
+            click.echo(f"  {name}")
+    click.echo()
 
 
 @cli.command()
@@ -488,38 +348,36 @@ def keygen():
 @cli.command()
 def milestones():
     """Show challenge parameters and defaults."""
-    click.echo(f"""
-Enigma Challenge Parameters
-============================
-
-All challenges run in Docker with:
-  --network none (no network access)
-  --wall-time {DEFAULT_WALL_TIME}s ({DEFAULT_WALL_TIME // 3600}h max runtime, matches validator)
-
-Use --allow-network and --wall-time to override for development.
-
-breaking_rsa
-  --difficulty   Bit-width of the semiprime to factor (default: 300)
-
-hardening_quantum_proof
-  --difficulty   Difficulty label (default: 1)
-  --circuit      Sample circuit ID (default: random)
-
-mock
-  --difficulty   Difficulty label (default: 1)
-  --private-key  Ed25519 private key hex (or ENIGMA_MOCK_PRIVATE_KEY env var)
-  --public-key   Ed25519 public key hex (or built-in default)
-
-Example solutions: workbench/challenges/*/example_solution/
-""")
+    lines = [
+        "Enigma Challenge Parameters",
+        "============================",
+        "",
+        "All challenges run in Docker with:",
+        "  --network none (no network access)",
+        f"  --wall-time {DEFAULT_WALL_TIME}s ({DEFAULT_WALL_TIME // 3600}h max runtime, matches validator)",
+        "",
+        "Use --allow-network and --wall-time to override for development.",
+        "",
+    ]
+    for slug in shipped_slugs():
+        spec = get_spec(slug)
+        assert spec is not None
+        lines.append(spec.slug)
+        if spec.extra_flags:
+            lines.append(f"  {spec.extra_flags}")
+        lines.append("")
+    lines.append("Example solutions: workbench/challenges/*/example_solution/")
+    click.echo("\n" + "\n".join(lines) + "\n")
 
 
 @cli.command()
 @click.argument("path", type=click.Path(exists=True))
-@click.option("--challenge", required=True, type=click.Choice(["breaking_rsa", "hardening_quantum_proof", "mock"]), help="Challenge type")
+@click.option("--challenge", required=True, help="Challenge slug or type id")
 def validate(path, challenge):
     """Validate output directory structure (no solver run)."""
-    results = validate_output(path, challenge)
+    spec = get_spec(challenge)
+    type_id = spec.type_id if spec else challenge
+    results = validate_output(path, type_id)
 
     click.echo("\n--- Structural Validation ---")
     all_passed = True
