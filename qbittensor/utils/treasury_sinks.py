@@ -32,7 +32,6 @@ TREASURY_SINK_HOTKEYS: tuple[str, ...] = (
     "5CDfAovpyrQoLqobEi3KLWXCUHauu5NMtyfvFfNU7FxArKkt",
     "5Hg2vYcw4vHxceXRqnA9nqoWwPuQDs2zoBGM7c1j1nanpG2H",
 )
-TREASURY_SINK_SET: frozenset[str] = frozenset(TREASURY_SINK_HOTKEYS)
 DEFAULT_TREASURY_SINK_HOTKEY: str = TREASURY_SINK_HOTKEYS[0]
 
 TREASURY_SINK_HOTKEYS_ENV: str = "TREASURY_SINK_HOTKEYS"
@@ -68,17 +67,3 @@ def resolve_sink_hotkey(
     if isinstance(fallback, str) and fallback:
         return fallback
     return keys[0]
-
-
-def sink_jwt_needs_refresh(
-    *,
-    sink_hotkey: Optional[str],
-    jwt_tempo_id: Optional[int],
-    current_tempo_id: Optional[int],
-) -> bool:
-    """True when the cached JWT has no usable sink or is from a prior tempo."""
-    if not (isinstance(sink_hotkey, str) and sink_hotkey in sink_set()):
-        return True
-    if isinstance(jwt_tempo_id, int) and isinstance(current_tempo_id, int):
-        return jwt_tempo_id != current_tempo_id
-    return False

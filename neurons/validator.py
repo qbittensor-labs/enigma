@@ -47,12 +47,10 @@ from qbittensor.utils.treasury_sinks import (
     default_sink_hotkey,
     resolve_sink_hotkey,
     sink_hotkeys,
-    sink_jwt_needs_refresh,
     sink_set,
 )
 
 TREASURY_HOTKEY: str = os.environ.get("TREASURY_HOTKEY") or default_sink_hotkey()
-TREASURY_WALLET_AMOUNT: float = 0.99
 PRIVATE_MINER_HOTKEY: str = os.environ.get(
     "PRIVATE_MINER_HOTKEY", "5HmQDNh8BrbDeT1bjgqXZ3KGAEb9n6doozNL2mQiJ9rYmuqh"
 )
@@ -360,56 +358,14 @@ class Validator(BaseValidatorNeuron):
                 submission_statuses=None,
             )
 
-    def _current_tempo_id(self) -> int | None:
-        """Current chain tempo index, or None if it cannot be read."""
-        try:
-            tempo = 360
-            try:
-                info = self.subtensor.subnets.info(self.config.netuid)
-                raw = getattr(info, "tempo", None)
-                if isinstance(raw, int) and raw > 0:
-                    tempo = raw
-            except Exception:
-                pass
-            block = getattr(self.subtensor, "block", None)
-            if not isinstance(block, int):
-                raw_block = getattr(self, "block", None)
-                if not isinstance(raw_block, int):
-                    return None
-                block = raw_block
-            if tempo <= 0:
-                return None
-            return int(block) // tempo
-        except Exception:
-            return None
-
     def _resolve_treasury_sink(self) -> str:
         """Platform sink if it is in the hardcoded list; otherwise the first sink.
-
-        A long-lived JWT that spans a tempo boundary is refreshed so every
-        validator still targets the same sink for the current tempo.
         """
-        rm = getattr(getattr(self, "platform_client", None), "request_manager", None)
-        jwt = getattr(rm, "jwt", None) if rm is not None else None
-        jwt_sink = getattr(jwt, "sink_hotkey", None)
-        jwt_tempo = getattr(jwt, "tempo_id", None)
-        if not isinstance(jwt_sink, str):
-            jwt_sink = None
-        if not isinstance(jwt_tempo, int):
-            jwt_tempo = None
-
-        current_tempo = self._current_tempo_id()
-        if rm is not None and sink_jwt_needs_refresh(
-            sink_hotkey=jwt_sink,
-            jwt_tempo_id=jwt_tempo,
-            current_tempo_id=current_tempo,
-        ):
+        jwt_sink = None
+        rm = self.platform_client.request_manager
+        if rm is not None:
             try:
-                refresh = getattr(rm, "refresh_jwt", None)
-                jwt = refresh() if callable(refresh) else None
-                jwt_sink = getattr(jwt, "sink_hotkey", None)
-                if not isinstance(jwt_sink, str):
-                    jwt_sink = None
+                jwt_sink = rm.refresh_jwt().sink_hotkey
             except Exception as exc:
                 bt.logging.warning(f"Could not refresh platform sink JWT: {exc}")
 
@@ -434,7 +390,7 @@ class Validator(BaseValidatorNeuron):
         """
         try:
             # Use numpy array (matching the clean template pattern) for scores
-            n = len(self.metagraph.uids) if hasattr(self.metagraph, "uids") else int(self.metagraph.n)
+            n = len(self.metagraph.hotkeys)
             weights = np.zeros(n, dtype=np.float32)
 
             # Get list of miners from db who have verified transactions within the last 3 weeks

@@ -19,7 +19,6 @@ from qbittensor.utils.treasury_sinks import (
     DEFAULT_TREASURY_SINK_HOTKEY,
     TREASURY_SINK_HOTKEYS,
     resolve_sink_hotkey,
-    sink_jwt_needs_refresh,
 )
 
 
@@ -36,39 +35,6 @@ class TestResolveSinkHotkey:
     def test_accepts_listed_sink(self):
         listed = TREASURY_SINK_HOTKEYS[3]
         assert resolve_sink_hotkey(listed) == listed
-
-
-class TestSinkJwtNeedsRefresh:
-    def test_missing_sink_needs_refresh(self):
-        assert sink_jwt_needs_refresh(
-            sink_hotkey=None, jwt_tempo_id=1, current_tempo_id=1
-        )
-
-    def test_unknown_sink_needs_refresh(self):
-        assert sink_jwt_needs_refresh(
-            sink_hotkey="5Nope", jwt_tempo_id=1, current_tempo_id=1
-        )
-
-    def test_stale_tempo_needs_refresh(self):
-        assert sink_jwt_needs_refresh(
-            sink_hotkey=TREASURY_SINK_HOTKEYS[1],
-            jwt_tempo_id=10,
-            current_tempo_id=11,
-        )
-
-    def test_current_valid_sink_does_not_refresh(self):
-        assert not sink_jwt_needs_refresh(
-            sink_hotkey=TREASURY_SINK_HOTKEYS[1],
-            jwt_tempo_id=10,
-            current_tempo_id=10,
-        )
-
-    def test_valid_sink_without_tempo_does_not_refresh(self):
-        assert not sink_jwt_needs_refresh(
-            sink_hotkey=TREASURY_SINK_HOTKEYS[1],
-            jwt_tempo_id=None,
-            current_tempo_id=10,
-        )
 
 
 class TestEnvOverride:

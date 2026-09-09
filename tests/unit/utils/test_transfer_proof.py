@@ -25,7 +25,7 @@ the transfer + a remark with the binding data.
 There is no legacy plain-transfer proof format.
 """
 
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
@@ -238,8 +238,6 @@ class TestBatchFeeVerification:
 
     def test_chain_get_block_fallback_when_state_discarded(self):
         """Lite/localnet nodes prune state; fee extrinsic is still in the block body."""
-        from unittest.mock import patch
-
         substrate = MagicMock()
         substrate.ss58_encode.side_effect = lambda x: (
             "5Coldkey" if isinstance(x, (bytes, bytearray)) else str(x)
@@ -304,3 +302,181 @@ class TestBatchFeeVerification:
         assert err == ""
         substrate.rpc_request.assert_called()
         substrate.decode_scale.assert_called()
+
+    def test_rejects_failed_receipt(self):
+        from async_substrate_interface.errors import ExtrinsicNotFound
+
+        substrate = MagicMock()
+        substrate.retrieve_extrinsic_by_hash.side_effect = ExtrinsicNotFound()
+        ok, err = _verify_batch_fee_payment_on_chain(
+            substrate=substrate,
+            block_hash="0xb",
+            extrinsic_hash="0xt",
+            expected_signer_ss58="5Coldkey",
+            expected_dest_ss58="5D82xX2p14X7gCGKu2Hpf8feNAzeXefgoeh4UJgVRpVTbVP4",
+            expected_value_rao=1,
+        )
+        assert ok is False
+        assert "not found" in err.lower()
+
+    def test_rejects_wrong_destination(self):
+        substrate = MagicMock()
+        substrate.ss58_encode.side_effect = lambda x: str(x)
+        remark_data = (
+            f"{FEE_BINDING_REMARK_VERSION}\namount_rao:10"
+        ).encode()
+        batch_ex = MagicMock()
+        batch_ex.value = {
+            "address": "5Coldkey",
+            "call": {
+                "call_module": "Utility",
+                "call_function": "batch_all",
+                "call_args": [{
+                    "name": "calls",
+                    "value": [
+                        make_mock_call(
+                            "Balances",
+                            "transfer_keep_alive",
+                            {"dest": "5WrongDest", "value": 10},
+                        ),
+                        make_mock_call("System", "remark_with_event", {"remark": remark_data}),
+                    ],
+                }],
+            },
+        }
+        receipt = Mock(is_success=True, error_message=None, extrinsic=batch_ex)
+        substrate.retrieve_extrinsic_by_hash.return_value = receipt
+        ok, err = _verify_batch_fee_payment_on_chain(
+            substrate=substrate,
+            block_hash="0xb",
+            extrinsic_hash="0xt",
+            expected_signer_ss58="5Coldkey",
+            expected_dest_ss58="5D82xX2p14X7gCGKu2Hpf8feNAzeXefgoeh4UJgVRpVTbVP4",
+            expected_value_rao=10,
+        )
+        assert ok is False
+        assert "destination" in err.lower()
+
+
+class TestProofHelpers:
+    def test_build_transfer_proof_message_strips_0x(self):
+        from qbittensor.utils.transfer_proof import (
+            TRANSFER_PROOF_VERSION,
+            build_transfer_proof_message,
+        )
+
+        msg = build_transfer_proof_message(
+            miner_hotkey="5H",
+            milestone_id="m",
+            upload_id="u",
+            tx_hash="0xABC",
+            transfer_from_ss58="5From",
+            transfer_to_ss58="5To",
+            transfer_amount_rao="9",
+        )
+        assert msg.startswith(TRANSFER_PROOF_VERSION)
+        assert "tx_hash:abc" in msg
+
+    def test_dest_to_ss58_and_coerce_rao(self):
+        from qbittensor.utils.transfer_proof import _coerce_int_rao, _dest_to_ss58
+
+        substrate = MagicMock()
+        substrate.ss58_encode.return_value = "5Encoded"
+        assert _dest_to_ss58("5Plain", substrate) == "5Plain"
+        assert _dest_to_ss58({"Id": b"\x00" * 32}, substrate) == "5Encoded"
+        assert _dest_to_ss58(None, substrate) is None
+        assert _coerce_int_rao(7) == 7
+        assert _coerce_int_rao("8") == 8
+        assert _coerce_int_rao(Mock(value=9)) == 9
+
+
+class TestVerifyTransferProofForSynapse:
+    def _proof(self, **overrides):
+        from qbittensor.dto.challenge import SolutionCandidateProof, TransferProof
+        from qbittensor.utils.transfer_proof import TRANSFER_DEST_SS58, build_transfer_proof_message
+
+        miner = "5MinerHotkey"
+        fields = dict(
+            tx_hash="0xdead",
+            transfer_block_hash="0xbeef",
+            transfer_from_ss58="5Cold",
+            transfer_to_ss58=TRANSFER_DEST_SS58,
+            transfer_amount_rao="100",
+            transfer_proof_signature_hex="aa",
+            solution_candidate=SolutionCandidateProof(
+                challenge_milestone_id="m1",
+                upload_endpoint_id="u1",
+            ),
+        )
+        fields.update(overrides)
+        if "transfer_proof_message" not in fields:
+            fields["transfer_proof_message"] = build_transfer_proof_message(
+                miner_hotkey=miner,
+                milestone_id="m1",
+                upload_id="u1",
+                tx_hash=fields["tx_hash"],
+                transfer_from_ss58=fields["transfer_from_ss58"],
+                transfer_to_ss58=fields["transfer_to_ss58"],
+                transfer_amount_rao=fields["transfer_amount_rao"],
+            )
+        return TransferProof(**fields), miner
+
+    def test_rejects_missing_fields(self):
+        from qbittensor.utils.transfer_proof import verify_transfer_proof_for_synapse
+
+        proof, miner = self._proof(tx_hash="   ")
+        ok, err = verify_transfer_proof_for_synapse(proof, miner, Mock(), "100")
+        assert ok is False
+        assert "tx_hash" in err
+
+    def test_rejects_wrong_amount_and_dest(self):
+        from qbittensor.utils.transfer_proof import (
+            TRANSFER_DEST_SS58,
+            verify_transfer_proof_for_synapse,
+        )
+
+        proof, miner = self._proof()
+        ok, err = verify_transfer_proof_for_synapse(proof, miner, Mock(), "999")
+        assert ok is False
+        assert "transfer_amount_rao" in err
+
+        proof, miner = self._proof(transfer_to_ss58="5NotTheFeeDest")
+        ok, err = verify_transfer_proof_for_synapse(proof, miner, Mock(), "100")
+        assert ok is False
+        assert TRANSFER_DEST_SS58[:8] in err or "fee destination" in err
+
+    def test_rejects_bad_signature_hex(self):
+        from qbittensor.utils.transfer_proof import verify_transfer_proof_for_synapse
+
+        proof, miner = self._proof(transfer_proof_signature_hex="zzzz")
+        ok, err = verify_transfer_proof_for_synapse(proof, miner, Mock(), "100")
+        assert ok is False
+        assert "hex" in err.lower()
+
+    def test_happy_path_with_mocked_signature_and_chain(self):
+        from qbittensor.utils.transfer_proof import verify_transfer_proof_for_synapse
+
+        proof, miner = self._proof()
+        subtensor = Mock()
+        kp = Mock()
+        kp.verify.return_value = True
+        with (
+            patch("qbittensor.utils.transfer_proof.Keypair", return_value=kp),
+            patch(
+                "qbittensor.utils.transfer_proof._get_hotkey_owner",
+                return_value="5Cold",
+            ),
+            patch(
+                "qbittensor.utils.transfer_proof._get_substrate",
+                return_value=Mock(),
+            ),
+            patch(
+                "qbittensor.utils.transfer_proof._verify_batch_fee_payment_on_chain",
+                return_value=(True, ""),
+            ) as verify_chain,
+        ):
+            ok, err = verify_transfer_proof_for_synapse(proof, miner, subtensor, "100")
+        assert ok is True, err
+        assert err == ""
+        verify_chain.assert_called_once()
+        kp.verify.assert_called_once()
