@@ -16,7 +16,11 @@
 # DEALINGS IN THE SOFTWARE.
 
 import pytest
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
 
+from qbittensor.database.migrations.runner import run_migrations_for_db
+from qbittensor.database.validator.db_query import DBQuery
 from qbittensor.utils.solution_status import SolutionStatus
 
 
@@ -233,7 +237,7 @@ class TestDBQuery:
         )
         assert bad_mil is None
 
-        # Different challenge for same tx → rejected
+        # Different challenge for same validation_id → rejected
         bad_ch = validator_query.create_challenge_solution(
             challenge_validation_solution_id="upload-abc",
             challenge_milestone_id="m1",
@@ -242,10 +246,11 @@ class TestDBQuery:
             tx_hash=tx,
             miner_hotkey="5Miner",
             challenge_id="ch-999",
+            validation_id="csv-reuse",
         )
         assert bad_ch is None
 
-        # Different submission_id *and* different work → rejected (the main tx reuse case)
+        # Different submission_id *and* different work for same validation_id → rejected
         bad_sub = validator_query.create_challenge_solution(
             challenge_validation_solution_id="upload-other",
             challenge_milestone_id="m-other",
@@ -254,6 +259,7 @@ class TestDBQuery:
             tx_hash=tx,
             miner_hotkey="5Miner",
             challenge_id="ch-other",
+            validation_id="csv-reuse",
         )
         assert bad_sub is None
 
@@ -286,3 +292,163 @@ class TestDBQuery:
         assert validator_query.get_miner_submission_statuses("5Nobody") == []
         # New stable-key updaters should gracefully return False for missing
         assert validator_query.update_solution_status_by_id("no-such-id", "foo") is False
+
+    def test_create_allows_same_tx_hash_with_distinct_validation_ids(self, validator_query):
+        """Multiple platform validations may share a fee tx (extra runs / cross-checks)."""
+        tx = "0xshared-fee"
+        first = validator_query.create_challenge_solution(
+            challenge_validation_solution_id="upload-abc",
+            challenge_milestone_id="m1",
+            submission_id="sub-1",
+            solution_status=SolutionStatus.PENDING.value,
+            tx_hash=tx,
+            miner_hotkey="5Miner",
+            challenge_id="ch-1",
+            validation_id="csv-run-1",
+        )
+        second = validator_query.create_challenge_solution(
+            challenge_validation_solution_id="upload-abc",
+            challenge_milestone_id="m1",
+            submission_id="sub-1",
+            solution_status=SolutionStatus.PENDING.value,
+            tx_hash=tx,
+            miner_hotkey="5Miner",
+            challenge_id="ch-1",
+            validation_id="csv-run-2",
+        )
+        assert first and second
+        assert first != second
+
+
+def _query_on_pre_0007_migrated_db(tmp_path):
+    """DBQuery against the schema migration 0007 produces on an existing table.
+
+    Production validators that existed before validation_id uniqueness get a
+    PARTIAL unique index (`WHERE validation_id IS NOT NULL`), not a UNIQUE
+    constraint. Tests that go through create_all do not cover that path.
+    """
+    db_path = tmp_path / "migrated_0007.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    with engine.connect() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE challenge_solutions (
+                    id VARCHAR(50) NOT NULL PRIMARY KEY,
+                    challenge_validation_solution_id VARCHAR(50) NOT NULL,
+                    container_id VARCHAR(100) NOT NULL,
+                    container_name VARCHAR(100) NOT NULL,
+                    image_id VARCHAR(100) NOT NULL,
+                    challenge_id VARCHAR(100),
+                    challenge_milestone_id VARCHAR(100) NOT NULL,
+                    max_solution_runtime_seconds INTEGER,
+                    absolute_path_to_solution VARCHAR(100) NOT NULL,
+                    submission_id VARCHAR(100) NOT NULL,
+                    solution_status VARCHAR(100) NOT NULL,
+                    tx_hash VARCHAR(100) NOT NULL UNIQUE,
+                    miner_hotkey VARCHAR(100) NOT NULL,
+                    cleaned BOOLEAN NOT NULL DEFAULT 0,
+                    created_at DATETIME,
+                    updated_at DATETIME
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    description VARCHAR(255) NOT NULL,
+                    applied_at DATETIME
+                )
+                """
+            )
+        )
+        for version, description in (
+            (1, "baseline"),
+            (2, "cleaned"),
+            (3, "runtime"),
+            (4, "verified"),
+            (5, "clear"),
+            (6, "force"),
+        ):
+            conn.execute(
+                text(
+                    "INSERT INTO schema_migrations (version, description, applied_at) "
+                    "VALUES (:v, :d, datetime('now'))"
+                ),
+                {"v": version, "d": description},
+            )
+        conn.commit()
+
+    run_migrations_for_db(engine, "challenge_solutions")
+    return DBQuery(sessionmaker(bind=engine)), engine
+
+
+def _assert_0007_partial_unique_index(engine):
+    with engine.connect() as conn:
+        indexes = list(conn.execute(text("PRAGMA index_list(challenge_solutions)")))
+        validation_unique = None
+        tx_hash_unique = False
+        for idx in indexes:
+            if not idx[2]:
+                continue
+            cols = [c[2] for c in conn.execute(text(f"PRAGMA index_info({idx[1]})"))]
+            if cols == ["validation_id"]:
+                validation_unique = idx
+            if cols == ["tx_hash"]:
+                tx_hash_unique = True
+        assert validation_unique is not None, indexes
+        # origin 'c' + partial=1 is the 0007 CREATE UNIQUE INDEX ... WHERE form
+        assert validation_unique[3] == "c"
+        assert validation_unique[4] == 1
+        assert tx_hash_unique is False
+
+
+class TestDBQueryMigrated0007Schema:
+    def test_create_challenge_solution_on_partial_unique_index(self, tmp_path):
+        """Regression: ON CONFLICT (validation_id) fails on 0007's partial unique index."""
+        query, engine = _query_on_pre_0007_migrated_db(tmp_path)
+        _assert_0007_partial_unique_index(engine)
+
+        created = query.create_challenge_solution(
+            challenge_validation_solution_id="cv-1",
+            challenge_milestone_id="m1",
+            submission_id="sub-1",
+            solution_status=SolutionStatus.PENDING.value,
+            tx_hash="0xabc",
+            miner_hotkey="5EZ52JMq4S7PYqzmLAggYahyDirMx3p1f1uBtLQgx6fk7kR8",
+            challenge_id="fac1d276-e99c-4ee4-8307-e8709f94d471",
+            validation_id="csv-1",
+        )
+        assert created
+        row = query.get_challenge_solution_by_id(created)
+        assert row is not None
+        assert row.validation_id == "csv-1"
+        assert row.miner_hotkey == "5EZ52JMq4S7PYqzmLAggYahyDirMx3p1f1uBtLQgx6fk7kR8"
+
+        reused = query.create_challenge_solution(
+            challenge_validation_solution_id="cv-1",
+            challenge_milestone_id="m1",
+            submission_id="sub-1",
+            solution_status=SolutionStatus.PENDING.value,
+            tx_hash="0xabc",
+            miner_hotkey="5EZ52JMq4S7PYqzmLAggYahyDirMx3p1f1uBtLQgx6fk7kR8",
+            challenge_id="fac1d276-e99c-4ee4-8307-e8709f94d471",
+            validation_id="csv-1",
+        )
+        assert reused == created
+
+        second = query.create_challenge_solution(
+            challenge_validation_solution_id="cv-1",
+            challenge_milestone_id="m1",
+            submission_id="sub-1",
+            solution_status=SolutionStatus.PENDING.value,
+            tx_hash="0xabc",
+            miner_hotkey="5EZ52JMq4S7PYqzmLAggYahyDirMx3p1f1uBtLQgx6fk7kR8",
+            challenge_id="fac1d276-e99c-4ee4-8307-e8709f94d471",
+            validation_id="csv-2",
+        )
+        assert second
+        assert second != created
