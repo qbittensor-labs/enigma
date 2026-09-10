@@ -57,24 +57,20 @@ class DBQuery(BaseDBQuery):
         max_solution_runtime_seconds: int | None = None,
         validation_id: str | None = None,
     ) -> str | None:
-        """Create (or re-use via guarded upsert) a challenge solution row for a tx_hash
+        """Create (or re-use) a challenge solution row for a platform validation_id
         before the container/runtime fields are known.
 
         Returns the stable solution `id` (PK) on success (new or re-used row), or None on failure.
         This lets callers (e.g. the execution path) immediately get the id for docker labels
-        and by-id updates without a separate get-by-tx lookup.
+        and by-id updates without a separate lookup.
 
-        Re-execution / re-run (including when the cloud offers a cross-check for
-        an already-processed item) is permitted only when the key identifiers for
-        the work item match those already associated with this `tx_hash`:
-        file upload (via challenge_validation_solution_id / upload_endpoint_id),
-        challenge_id, and challenge_milestone_id (submission_id is also checked
-        for the primary cloud claim binding).
+        Uniqueness is on validation_id: one local execution per platform
+        challenge_submission_validation row. The same tx_hash may appear on more
+        than one row (padded extra runs / cross-checks).
 
-        If the cloud offers the same tx_hash but with a differing file-upload /
-        challenge_id / milestone_id (or a conflicting submission_id for different
-        work), the request is rejected. This disallows tx_hash reuse across
-        different submissions/uploads/challenges/milestones.
+        Re-execution of the same validation_id is permitted only when the key
+        identifiers for the work item match the existing row: file upload
+        (challenge_validation_solution_id), challenge_id, and challenge_milestone_id.
         """
         return self.insert_challenge_solution(
             challenge_validation_solution_id=challenge_validation_solution_id,
@@ -150,23 +146,20 @@ class DBQuery(BaseDBQuery):
         max_solution_runtime_seconds: int | None = None,
         validation_id: str | None = None,
     ):
-        """Insert (or upsert on tx_hash) a challenge solution record.
+        """Insert a challenge solution, or refresh the existing row for this validation_id.
 
-        Re-execution of the same cloud submission, or re-running for a cross-check
-        that the cloud offers for the *same* file upload / tx_hash / challenge id /
-        milestone id, is allowed when the identifiers are consistent with the
-        row already bound to this tx_hash.
+        Uniqueness is on validation_id (one local execution per platform
+        challenge_submission_validation row). The same tx_hash may appear on more
+        than one row (padded extra runs / cross-checks).
 
-        The primary binding is tx_hash → one cloud submission (by submission_id),
-        plus the specific work item (file upload identified by
-        challenge_validation_solution_id/upload_endpoint_id, plus challenge_id and
-        challenge_milestone_id).
+        Re-execution of the same validation_id is allowed when the work identifiers
+        (file upload, challenge, milestone) match the existing row. A conflicting
+        file/challenge/milestone for the same validation_id is rejected.
 
-        If an existing row for the tx_hash has differing values for any of
-        submission_id (for different work), challenge_validation_solution_id (file
-        upload), challenge_id, or challenge_milestone_id, the upsert is rejected.
-        This disallows tx_hash reuse for different submissions / file uploads /
-        challenges / milestones.
+        This is an explicit insert-or-update rather than SQLite ON CONFLICT. Migration
+        0007 uniqueness is a partial unique index (`WHERE validation_id IS NOT NULL`),
+        which does not match `ON CONFLICT (validation_id)` and made every pending
+        insert fail on upgraded validator databases.
         """
         bt.logging.info(
             f"Inserting/Upserting challenge solution with tx_hash={tx_hash} validation_id={validation_id}"
@@ -182,13 +175,13 @@ class DBQuery(BaseDBQuery):
 
                 if existing:
                     # Check consistency of the key identifiers the cloud uses to identify
-                    # a cross-check / execution item for this tx: file upload (the
+                    # a cross-check / execution item for this validation: file upload (the
                     # challenge_validation_solution_id / upload_endpoint_id), challenge_id,
                     # challenge_milestone_id, and submission_id.
                     # This allows legitimate re-runs when the cloud re-offers the *same*
                     # cross-check for the same file/tx/challenge/milestone (even if it
                     # presents a different submission.id for the cross-check task itself),
-                    # while rejecting attempts to reuse a tx_hash for different work.
+                    # while rejecting attempts to reuse a validation_id for different work.
                     mismatches = []
                     if existing.submission_id and submission_id and existing.submission_id != submission_id:
                         mismatches.append(
@@ -219,22 +212,21 @@ class DBQuery(BaseDBQuery):
                         # We consider the work the same if file/ch/milestone line up.
                         work_id_mismatches = [m for m in mismatches if "submission_id" not in m]
                         if work_id_mismatches:
-                            # Real mismatch on the work item (file / ch / mil) → hard reject to
-                            # disallow tx reuse for different submissions/uploads/challenges.
+                            # Real mismatch on the work item (file / ch / mil) → hard reject.
                             bt.logging.error(
-                                f"❌ Refusing upsert for tx_hash={tx_hash}: "
+                                f"❌ Refusing upsert for validation_id={validation_id}: "
                                 f"identifier mismatch on {', '.join(mismatches)}. "
-                                "A tx_hash must not be reused for a different file upload / "
+                                "A validation_id must not be reused for a different file upload / "
                                 "submission / challenge / milestone."
                             )
                             return None
                         else:
                             # Only submission_id differs, but file/challenge/milestone match
-                            # the previously recorded work for this tx → this is a legitimate
-                            # re-execution (e.g. platform cross-check for the same miner's
-                            # uploaded solution).
+                            # the previously recorded work for this validation → this is a
+                            # legitimate re-execution (e.g. platform cross-check for the same
+                            # miner's uploaded solution).
                             bt.logging.info(
-                                f"Re-executing same work item for tx_hash={tx_hash} "
+                                f"Re-executing same work item for validation_id={validation_id} "
                                 f"(file/ch/milestone match; submission_id differs, e.g. cross-check "
                                 f"existing={existing.submission_id} incoming={submission_id})"
                             )
@@ -243,60 +235,54 @@ class DBQuery(BaseDBQuery):
                         # of the same cloud submission.
                         bt.logging.info(
                             f"Re-executing same cloud submission (tx_hash={tx_hash}, "
-                            f"submission_id={submission_id})"
+                            f"submission_id={submission_id}, validation_id={validation_id})"
                         )
 
-                now = func.now()
-                stmt = insert(ChallengeSolution).values(
-                    id=str(uuid.uuid4()),  # only used on actual INSERT
-                    challenge_validation_solution_id=challenge_validation_solution_id,
-                    container_id=container_id,
-                    container_name=container_name,
-                    image_id=image_id,
-                    challenge_id=challenge_id,
-                    challenge_milestone_id=challenge_milestone_id,
-                    absolute_path_to_solution=absolute_path_to_solution,
-                    submission_id=submission_id,
-                    solution_status=solution_status,
-                    tx_hash=tx_hash,
-                    validation_id=validation_id,
-                    miner_hotkey=miner_hotkey,
-                    cleaned=cleaned,
-                    max_solution_runtime_seconds=max_solution_runtime_seconds,
-                    created_at=now,
-                    updated_at=now,
-                )
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=["validation_id"],
-                    set_={
-                        "challenge_validation_solution_id": challenge_validation_solution_id,
-                        "container_id": container_id,
-                        "container_name": container_name,
-                        "image_id": image_id,
-                        "challenge_id": challenge_id,
-                        "challenge_milestone_id": challenge_milestone_id,
-                        "absolute_path_to_solution": absolute_path_to_solution,
-                        "submission_id": submission_id,
-                        "solution_status": solution_status,
-                        "tx_hash": tx_hash,
-                        "miner_hotkey": miner_hotkey,
-                        "cleaned": cleaned,
-                        "max_solution_runtime_seconds": max_solution_runtime_seconds,
-                        "updated_at": now,
-                    },
-                )
-                session.execute(stmt)
-
-                row = session.query(ChallengeSolution).filter_by(validation_id=validation_id).first()
-                if row:
-                    action = "Re-used" if existing else "Inserted new"
+                    existing.challenge_validation_solution_id = challenge_validation_solution_id
+                    existing.container_id = container_id
+                    existing.container_name = container_name
+                    existing.image_id = image_id
+                    existing.challenge_id = challenge_id
+                    existing.challenge_milestone_id = challenge_milestone_id
+                    existing.absolute_path_to_solution = absolute_path_to_solution
+                    existing.submission_id = submission_id
+                    existing.solution_status = solution_status
+                    existing.tx_hash = tx_hash
+                    existing.miner_hotkey = miner_hotkey
+                    existing.cleaned = cleaned
+                    existing.max_solution_runtime_seconds = max_solution_runtime_seconds
+                    existing.updated_at = func.now()
                     bt.logging.info(
-                        f" ✅ {action} challenge solution row "
-                        f"(id={row.id}, submission_id={submission_id}, tx_hash={tx_hash})"
+                        f" ✅ Re-used challenge solution row "
+                        f"(id={existing.id}, submission_id={submission_id}, tx_hash={tx_hash})"
                     )
-                    return row.id
+                    return existing.id
 
-                return None
+                new_id = str(uuid.uuid4())
+                session.add(
+                    ChallengeSolution(
+                        id=new_id,
+                        challenge_validation_solution_id=challenge_validation_solution_id,
+                        container_id=container_id,
+                        container_name=container_name,
+                        image_id=image_id,
+                        challenge_id=challenge_id,
+                        challenge_milestone_id=challenge_milestone_id,
+                        absolute_path_to_solution=absolute_path_to_solution,
+                        submission_id=submission_id,
+                        solution_status=solution_status,
+                        tx_hash=tx_hash,
+                        validation_id=validation_id,
+                        miner_hotkey=miner_hotkey,
+                        cleaned=cleaned,
+                        max_solution_runtime_seconds=max_solution_runtime_seconds,
+                    )
+                )
+                bt.logging.info(
+                    f" ✅ Inserted new challenge solution row "
+                    f"(id={new_id}, submission_id={submission_id}, tx_hash={tx_hash})"
+                )
+                return new_id
 
         except Exception as e:
             bt.logging.error(f" ❌ Error inserting/updating challenge solution: {e}")
