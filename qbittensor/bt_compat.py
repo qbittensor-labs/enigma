@@ -72,6 +72,12 @@ class _LoggingCompat:
         parser.add_argument("--logging.debug", action="store_true", default=False)
         parser.add_argument("--logging.trace", action="store_true", default=False)
         parser.add_argument(
+            "--logging.info",
+            action="store_true",
+            default=False,
+            help="Keep the default INFO log level (no-op; accepted so pack extra_args is a known flag).",
+        )
+        parser.add_argument(
             "--logging.logging_dir",
             type=str,
             default=os.path.expanduser("~/.bittensor/miners"),
