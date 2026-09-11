@@ -70,6 +70,7 @@ arguments:
     required: false
     type: path
     default: "~/.bittensor/wallets"
+    prompt: false
     help: "Wallets directory."
 
   - name: neuron.device
@@ -100,17 +101,21 @@ arguments:
     required: false
     type: str
     default: "0.0.0.0"
+    prompt: false
 
   - name: axon.external_ip
     flag: --axon.external_ip
     required: false
     type: str
-    help: "Publishable IP for on-chain axon. Required behind NAT."
+    help: >
+      Publishable IP for ServeAxon. Optional: validator ServeAxon is best-effort
+      (miners still need a reachable axon). Required behind NAT if you do serve.
 
   - name: axon.external_port
     flag: --axon.external_port
     required: false
     type: int
+    help: "Published port if NAT/port-map differs from --axon.port."
 
   - name: subtensor.network
     flag: --subtensor.network
@@ -123,33 +128,57 @@ arguments:
     flag: --subtensor.chain_endpoint
     required: false
     type: str
+    help: "Optional ws/wss override."
 
   - name: neuron.epoch_length
     flag: --neuron.epoch_length
     required: false
     type: int
     default: 100
+    prompt: false
+    help: "Blocks between set_weights / metagraph sync (12s blocks)."
+
+  - name: neuron.miner_sweep_interval
+    flag: --neuron.miner_sweep_interval
+    required: false
+    type: int
+    default: 600
+    prompt: false
+    help: "Target seconds to contact every miner once. Validator-only."
+
+  - name: neuron.forward_sleep_interval
+    flag: --neuron.forward_sleep_interval
+    required: false
+    type: int
+    default: 5
+    prompt: false
+    help: "Seconds between forward() ticks. Validator-only."
 
 env:
   - name: ENIGMA_DATA_DIR
     required: false
     help: "Set automatically from --neuron.data_dir if omitted."
-  - name: CHALLENGES_API_URL
+  - name: VALIDATOR_DOCKER_GPUS
     required: false
-    default: https://challenges.qbittensorlabs.com
-  - name: TENSORAUTH_URL
-    required: false
-    default: https://tensorauth.qbittensorlabs.com
-  - name: TELEMETRY_API_URL
-    required: false
-    default: https://telemetry.qbittensorlabs.com
+    default: all
+    help: >
+      Validator-only. docker run --gpus for the GPU smoke test and solution
+      containers (all | device=0). Empty disables GPU passthrough.
+      This is what Enigma reads — not NVIDIA_VISIBLE_DEVICES.
   - name: NVIDIA_VISIBLE_DEVICES
     required: false
-    help: "Optional GPU pin for Docker child containers the validator launches. Warn on overlap with another instance."
+    help: >
+      Optional host GPU pin for this process. neuron-ops overlap warnings look
+      at neuron.device / this var. Does not pin Enigma solution containers
+      (use VALIDATOR_DOCKER_GPUS).
   - name: BT_WALLET_PASSWORD
     required: false
     secret: true
-    help: "Only if the hotkey is encrypted. Unencrypted hotkeys are the expected production path. Written to instances/<name>/env chmod 600, never logs/API."
+    help: >
+      Password for an encrypted hotkey. The long-running validator loads
+      bt.Wallet with no TTY and uses wallet.hotkey for dendrite + platform JWT.
+      An encrypted hotkey hangs without this. Not miner-only and not the
+      mine-enigma fee coldkey. Blank = unencrypted hotkey (expected prod path).
 
 health:
   process_alive: true

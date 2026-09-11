@@ -29,6 +29,8 @@ from neurons.validator import (
     Validator,
 )
 from qbittensor.utils.treasury_sinks import TREASURY_SINK_HOTKEYS
+from qbittensor.utils.burn_sinks import BURN_SINK_HOTKEYS
+from qbittensor.utils.treasury_cap import CapDecision
 
 from qbittensor.base.utils.weight_utils import (
     process_weights_for_netuid,
@@ -146,14 +148,25 @@ class TestSetWeights:
     """
 
     @staticmethod
-    def _stub_sink_jwt(mock_validator, sink_hotkey=TREASURY_HOTKEY, *, error=None):
+    def _stub_sink_jwt(
+        mock_validator,
+        sink_hotkey=TREASURY_HOTKEY,
+        burn_sink_hotkey=None,
+        *,
+        error=None,
+        tempo_id=None,
+        cached_jwt=None,
+    ):
         rm = Mock()
         if error is not None:
             rm.refresh_jwt.side_effect = error
         else:
             jwt = Mock()
             jwt.sink_hotkey = sink_hotkey
+            jwt.burn_hotkey = burn_sink_hotkey
+            jwt.tempo_id = tempo_id
             rm.refresh_jwt.return_value = jwt
+        rm.jwt = cached_jwt
         mock_validator.platform_client.request_manager = rm
         return rm
 
@@ -550,6 +563,46 @@ class TestSetWeights:
         assert weights[mock_validator.metagraph.hotkeys.index(TREASURY_HOTKEY)] >= 0.999
         mock_super.assert_called_once()
 
+    def test_set_weights_refreshes_jwt_when_tempo_changes(self, mock_validator):
+        old_sink = TREASURY_SINK_HOTKEYS[1]
+        new_sink = TREASURY_SINK_HOTKEYS[3]
+        mock_validator.metagraph.hotkeys = [old_sink, new_sink, PRIVATE_MINER_HOTKEY]
+        mock_validator.database_connection.db_query.get_active_miners.return_value = []
+
+        stale = Mock()
+        stale.sink_hotkey = old_sink
+        stale.burn_hotkey = BURN_SINK_HOTKEYS[0]
+        stale.tempo_id = 1
+        rm = self._stub_sink_jwt(
+            mock_validator, new_sink, BURN_SINK_HOTKEYS[0], tempo_id=2, cached_jwt=stale
+        )
+        mock_validator.subtensor.block = 720  # tempo 2
+
+        with patch("neurons.validator.BaseValidatorNeuron.set_weights") as mock_super:
+            mock_validator.set_weights()
+
+        weights = mock_validator.scores
+        assert weights[mock_validator.metagraph.hotkeys.index(new_sink)] >= 0.999
+        assert weights[mock_validator.metagraph.hotkeys.index(old_sink)] >= MIN_DUST_FLOOR
+        rm.refresh_jwt.assert_called_once()
+        mock_super.assert_called_once()
+
+    def test_set_weights_dusts_idle_burn_sinks(self, mock_validator, monkeypatch):
+        sink = TREASURY_SINK_HOTKEYS[0]
+        burn = "5SecondBurnSinkHotkeyXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+        monkeypatch.setenv("BURN_SINK_HOTKEYS", f"{BURN_SINK_HOTKEYS[0]},{burn}")
+        mock_validator.metagraph.hotkeys = [sink, burn, PRIVATE_MINER_HOTKEY]
+        mock_validator.database_connection.db_query.get_active_miners.return_value = []
+        self._stub_sink_jwt(mock_validator, sink, BURN_SINK_HOTKEYS[0])
+
+        with patch("neurons.validator.BaseValidatorNeuron.set_weights") as mock_super:
+            mock_validator.set_weights()
+
+        weights = mock_validator.scores
+        assert weights[mock_validator.metagraph.hotkeys.index(sink)] >= 0.999
+        assert weights[mock_validator.metagraph.hotkeys.index(burn)] >= MIN_DUST_FLOOR
+        mock_super.assert_called_once()
+
     def test_set_weights_skips_chain_when_treasury_missing_from_metagraph(self, mock_validator):
         mock_validator.metagraph.hotkeys = ["miner1", PRIVATE_MINER_HOTKEY]
         mock_validator.database_connection.db_query.get_active_miners.return_value = ["miner1"]
@@ -907,3 +960,124 @@ class TestMinerQueryThrottling:
                 # We can't easily map back without the metagraph, but we can assert
                 # that we never passed the bad_axon object.
                 assert axon_arg is not bad_axon
+
+
+class TestTreasuryCapHook:
+    """JWT sink vs JWT burn routing inside Validator.set_weights()."""
+
+    OWNER_HK = BURN_SINK_HOTKEYS[0]
+
+    def _enable_cap(self, monkeypatch):
+        monkeypatch.setenv("TREASURY_CAP_ENABLED", "1")
+
+    def _run(self, mock_validator, *, decision: CapDecision):
+        TestSetWeights._stub_sink_jwt(
+            mock_validator, TREASURY_HOTKEY, self.OWNER_HK
+        )
+        with (
+            patch("neurons.validator.decide_treasury_share", return_value=decision),
+            patch("neurons.validator.BaseValidatorNeuron.set_weights") as mock_super,
+        ):
+            mock_validator.set_weights()
+        return mock_super
+
+    def test_burn_routes_share_to_jwt_burn_and_dusts_sink(self, mock_validator, monkeypatch):
+        self._enable_cap(monkeypatch)
+        mock_validator.metagraph.hotkeys = [TREASURY_HOTKEY, self.OWNER_HK, "miner1"]
+        mock_super = self._run(
+            mock_validator,
+            decision=CapDecision(
+                burn=True,
+                reason="at_cap",
+                active_challenges=1,
+                treasury_alpha=400_000.0,
+                effective_cap=200_000.0,
+            ),
+        )
+
+        weights = mock_validator.scores
+        owner_uid = mock_validator.metagraph.hotkeys.index(self.OWNER_HK)
+        sink_uid = mock_validator.metagraph.hotkeys.index(TREASURY_HOTKEY)
+        assert weights[owner_uid] >= 0.99
+        assert weights[sink_uid] >= MIN_DUST_FLOOR
+        mock_super.assert_called_once()
+
+    def test_below_cap_funds_treasury_and_dusts_burn(self, mock_validator, monkeypatch):
+        self._enable_cap(monkeypatch)
+        mock_validator.metagraph.hotkeys = [TREASURY_HOTKEY, self.OWNER_HK, "miner1"]
+        mock_super = self._run(
+            mock_validator,
+            decision=CapDecision(
+                burn=False,
+                reason="below_cap",
+                active_challenges=2,
+                treasury_alpha=345_000.0,
+                effective_cap=400_000.0,
+            ),
+        )
+
+        weights = mock_validator.scores
+        sink_uid = mock_validator.metagraph.hotkeys.index(TREASURY_HOTKEY)
+        owner_uid = mock_validator.metagraph.hotkeys.index(self.OWNER_HK)
+        assert weights[sink_uid] >= 0.99
+        assert weights[owner_uid] >= MIN_DUST_FLOOR
+        mock_super.assert_called_once()
+
+    def test_burn_sink_missing_from_metagraph_funds(self, mock_validator, monkeypatch):
+        self._enable_cap(monkeypatch)
+        mock_validator.metagraph.hotkeys = [TREASURY_HOTKEY, "miner1"]
+        mock_super = self._run(
+            mock_validator,
+            decision=CapDecision(
+                burn=True,
+                reason="at_cap",
+                active_challenges=1,
+                treasury_alpha=400_000.0,
+                effective_cap=200_000.0,
+            ),
+        )
+
+        sink_uid = mock_validator.metagraph.hotkeys.index(TREASURY_HOTKEY)
+        assert mock_validator.scores[sink_uid] >= 0.99
+        mock_super.assert_called_once()
+
+    def test_unknown_count_funds(self, mock_validator, monkeypatch):
+        self._enable_cap(monkeypatch)
+        mock_validator.metagraph.hotkeys = [TREASURY_HOTKEY, self.OWNER_HK]
+        mock_super = self._run(
+            mock_validator,
+            decision=CapDecision(burn=False, reason="unknown_count"),
+        )
+
+        sink_uid = mock_validator.metagraph.hotkeys.index(TREASURY_HOTKEY)
+        assert mock_validator.scores[sink_uid] >= 0.99
+        mock_super.assert_called_once()
+
+    def test_missing_sink_refuses_even_when_burning(self, mock_validator, monkeypatch):
+        self._enable_cap(monkeypatch)
+        mock_validator.metagraph.hotkeys = [self.OWNER_HK, "miner1"]
+        mock_super = self._run(
+            mock_validator,
+            decision=CapDecision(
+                burn=True,
+                reason="at_cap",
+                active_challenges=1,
+                treasury_alpha=400_000.0,
+                effective_cap=200_000.0,
+            ),
+        )
+        mock_super.assert_not_called()
+
+    def test_disabled_cap_never_decides(self, mock_validator, monkeypatch):
+        monkeypatch.delenv("TREASURY_CAP_ENABLED", raising=False)
+        mock_validator.metagraph.hotkeys = [TREASURY_HOTKEY, "miner1"]
+        TestSetWeights._stub_sink_jwt(mock_validator, TREASURY_HOTKEY, self.OWNER_HK)
+        with (
+            patch("neurons.validator.decide_treasury_share") as mock_decide,
+            patch("neurons.validator.BaseValidatorNeuron.set_weights") as mock_super,
+        ):
+            mock_validator.set_weights()
+        mock_decide.assert_not_called()
+        sink_uid = mock_validator.metagraph.hotkeys.index(TREASURY_HOTKEY)
+        assert mock_validator.scores[sink_uid] >= 0.99
+        mock_super.assert_called_once()

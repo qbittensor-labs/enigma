@@ -84,6 +84,7 @@ class TestJWTManager:
         assert token.access_token == "abc"
         assert token.expires_in == 60
         assert token.sink_hotkey is None
+        assert token.burn_hotkey is None
         assert token.tempo_id is None
 
     def test_get_jwt_parses_optional_sink_fields(self):
@@ -96,6 +97,7 @@ class TestJWTManager:
             "access_token": "tok123",
             "expires_in": 3600,
             "sink_hotkey": "5DCLafsAKaLeZwm9hjMHvrQNjtucSwBhKyTLYnYmMvhxF2Uc",
+            "burn_hotkey": "5GmpedVP2r9haksUBD743wek8t89jMz96RTkV2zkVdRR4e1B",
             "tempo_id": 99,
         }
         mock_response.raise_for_status = Mock()
@@ -106,4 +108,5 @@ class TestJWTManager:
 
         jwt = manager.get_jwt()
         assert jwt.sink_hotkey == "5DCLafsAKaLeZwm9hjMHvrQNjtucSwBhKyTLYnYmMvhxF2Uc"
+        assert jwt.burn_hotkey == "5GmpedVP2r9haksUBD743wek8t89jMz96RTkV2zkVdRR4e1B"
         assert jwt.tempo_id == 99

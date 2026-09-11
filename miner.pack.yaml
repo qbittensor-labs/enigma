@@ -64,6 +64,7 @@ arguments:
     required: false
     type: path
     default: "~/.bittensor/wallets"
+    prompt: false
     help: "Wallets directory."
   - name: neuron.data_dir
     flag: --neuron.data_dir
@@ -82,33 +83,52 @@ arguments:
     required: false
     type: str
     default: "0.0.0.0"
+    prompt: false
   - name: axon.external_ip
     flag: --axon.external_ip
     required: true
     type: str
-    help: "Publishable IP for ServeAxon"
+    help: "Publishable IP for ServeAxon (required; miners must be reachable)."
+  - name: axon.external_port
+    flag: --axon.external_port
+    required: false
+    type: int
+    help: "Published port if NAT/port-map differs from --axon.port."
   - name: subtensor.network
     flag: --subtensor.network
     required: false
     type: str
     default: finney
+    help: "finney | test | local | ws(s):// endpoint"
+  - name: subtensor.chain_endpoint
+    flag: --subtensor.chain_endpoint
+    required: false
+    type: str
+    help: "Optional ws/wss override. Same flag as the validator."
   - name: treasury.trusted_hotkeys
     flag: --treasury.trusted_hotkeys
     required: false
     type: str
+    help: "Miner-only. Comma-separated validator hotkeys allowed to receive submissions. Replaces the built-in allowlist."
   - name: treasury.disable_whitelist_check
     flag: --treasury.disable_whitelist_check
     required: false
     type: switch
     default: false
+    help: "Miner-only. Offer submissions to any registered validator."
 
 env:
   - name: ENIGMA_DATA_DIR
     required: false
+    help: "Set automatically from --neuron.data_dir if omitted."
   - name: BT_WALLET_PASSWORD
     required: false
     secret: true
-    help: "Only if the hotkey is encrypted; unencrypted hotkeys are the expected prod path"
+    help: >
+      Password for an encrypted hotkey. The long-running miner loads bt.Wallet
+      with no TTY and signs transfer proofs with wallet.hotkey; an encrypted
+      hotkey hangs without this. Not the mine-enigma fee coldkey (that CLI is
+      not supervised). Blank = unencrypted hotkey (expected prod path).
 
 health:
   process_alive: true

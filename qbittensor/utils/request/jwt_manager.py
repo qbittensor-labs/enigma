@@ -35,6 +35,7 @@ class KeycloakJWT(BaseModel):
     access_token: str
     expires_in: int
     sink_hotkey: Optional[str] = None
+    burn_hotkey: Optional[str] = None
     tempo_id: Optional[int] = None
 
 

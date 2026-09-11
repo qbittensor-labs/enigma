@@ -67,3 +67,36 @@ def resolve_sink_hotkey(
     if isinstance(fallback, str) and fallback:
         return fallback
     return keys[0]
+
+
+def treasury_wallet_coldkey(metagraph, sink_hotkey: str) -> Optional[str]:
+    """Coldkey of the treasury wallet that owns ``sink_hotkey``.
+
+    All treasury sink hotkeys are registered under the vault coldkey. Stake
+    for the prize pool is measured on that coldkey, not via a separate env var.
+    """
+    try:
+        uid = list(metagraph.hotkeys).index(sink_hotkey)
+        coldkeys = getattr(metagraph, "coldkeys", None)
+        if coldkeys is None:
+            return None
+        ck = coldkeys[uid]
+        if isinstance(ck, str) and ck.strip():
+            return ck.strip()
+    except Exception:
+        return None
+    return None
+
+
+def sink_jwt_needs_refresh(
+    *,
+    sink_hotkey: Optional[str],
+    jwt_tempo_id: Optional[int],
+    current_tempo_id: Optional[int],
+) -> bool:
+    """True when the cached JWT has no usable sink or is from a prior tempo."""
+    if not (isinstance(sink_hotkey, str) and sink_hotkey in sink_set()):
+        return True
+    if isinstance(jwt_tempo_id, int) and isinstance(current_tempo_id, int):
+        return jwt_tempo_id != current_tempo_id
+    return False

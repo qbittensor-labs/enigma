@@ -20,6 +20,7 @@ import asyncio
 import os
 from typing import Any, List
 import time
+from datetime import datetime, timezone
 
 import numpy as np
 
@@ -47,8 +48,17 @@ from qbittensor.utils.treasury_sinks import (
     default_sink_hotkey,
     resolve_sink_hotkey,
     sink_hotkeys,
+    sink_jwt_needs_refresh,
     sink_set,
+    treasury_wallet_coldkey,
 )
+from qbittensor.utils.burn_sinks import (
+    burn_sink_hotkeys,
+    burn_sink_jwt_needs_refresh,
+    burn_sink_set,
+    resolve_burn_sink_hotkey,
+)
+from qbittensor.utils.treasury_cap import decide_treasury_share, load_config as load_treasury_cap_config
 
 TREASURY_HOTKEY: str = os.environ.get("TREASURY_HOTKEY") or default_sink_hotkey()
 PRIVATE_MINER_HOTKEY: str = os.environ.get(
@@ -358,101 +368,204 @@ class Validator(BaseValidatorNeuron):
                 submission_statuses=None,
             )
 
-    def _resolve_treasury_sink(self) -> str:
-        """Platform sink if it is in the hardcoded list; otherwise the first sink.
-        """
-        jwt_sink = None
-        rm = self.platform_client.request_manager
-        if rm is not None:
+    def _current_tempo_id(self) -> int | None:
+        """Current chain tempo index, or None if it cannot be read."""
+        try:
+            tempo = 360
             try:
-                jwt_sink = rm.refresh_jwt().sink_hotkey
+                info = self.subtensor.subnets.info(self.config.netuid)
+                raw = getattr(info, "tempo", None)
+                if isinstance(raw, int) and raw > 0:
+                    tempo = raw
+            except Exception:
+                pass
+            block = getattr(self.subtensor, "block", None)
+            if not isinstance(block, int):
+                raw_block = getattr(self, "block", None)
+                if not isinstance(raw_block, int):
+                    return None
+                block = raw_block
+            if tempo <= 0:
+                return None
+            return int(block) // tempo
+        except Exception:
+            return None
+
+    def _resolve_weight_targets(self) -> tuple[str, str]:
+        """JWT treasury sink and burn sink, allowlist-checked, for this tempo.
+
+        Refreshes the cached JWT when either key is missing/unknown or the
+        token's tempo_id is stale. Unknown claims fall back to the first
+        listed treasury / burn sink.
+        """
+        rm = getattr(getattr(self, "platform_client", None), "request_manager", None)
+        jwt = getattr(rm, "jwt", None) if rm is not None else None
+        jwt_sink = getattr(jwt, "sink_hotkey", None)
+        jwt_burn_sink = getattr(jwt, "burn_hotkey", None)
+        jwt_tempo = getattr(jwt, "tempo_id", None)
+        if not isinstance(jwt_sink, str):
+            jwt_sink = None
+        if not isinstance(jwt_burn_sink, str):
+            jwt_burn_sink = None
+        if not isinstance(jwt_tempo, int):
+            jwt_tempo = None
+
+        current_tempo = self._current_tempo_id()
+        needs_refresh = sink_jwt_needs_refresh(
+            sink_hotkey=jwt_sink,
+            jwt_tempo_id=jwt_tempo,
+            current_tempo_id=current_tempo,
+        ) or burn_sink_jwt_needs_refresh(
+            burn_sink_hotkey=jwt_burn_sink,
+            jwt_tempo_id=jwt_tempo,
+            current_tempo_id=current_tempo,
+        )
+
+        if rm is not None and needs_refresh:
+            try:
+                refresh = getattr(rm, "refresh_jwt", None)
+                jwt = refresh() if callable(refresh) else None
+                jwt_sink = getattr(jwt, "sink_hotkey", None)
+                jwt_burn_sink = getattr(jwt, "burn_hotkey", None)
+                if not isinstance(jwt_sink, str):
+                    jwt_sink = None
+                if not isinstance(jwt_burn_sink, str):
+                    jwt_burn_sink = None
             except Exception as exc:
                 bt.logging.warning(f"Could not refresh platform sink JWT: {exc}")
 
         sink = resolve_sink_hotkey(jwt_sink, fallback=TREASURY_HOTKEY)
+        burn_sink = resolve_burn_sink_hotkey(jwt_burn_sink)
+
         if jwt_sink and jwt_sink not in sink_set():
             bt.logging.warning(
                 f"Platform sink {jwt_sink} is not in the treasury sink list; "
                 f"defaulting to {sink}"
             )
         elif not jwt_sink:
-            bt.logging.warning(
-                f"No platform sink available; defaulting to {sink}"
-            )
+            bt.logging.warning(f"No platform sink available; defaulting to {sink}")
         else:
             bt.logging.info(f"Treasury sink for this tempo: {sink}")
-        return sink
+
+        if jwt_burn_sink and jwt_burn_sink not in burn_sink_set():
+            bt.logging.warning(
+                f"Platform burn sink {jwt_burn_sink} is not in the burn sink list; "
+                f"defaulting to {burn_sink}"
+            )
+        elif not jwt_burn_sink:
+            bt.logging.warning(f"No platform burn sink available; defaulting to {burn_sink}")
+        else:
+            bt.logging.info(f"Burn sink for this tempo: {burn_sink}")
+
+        return sink, burn_sink
 
     def set_weights(self):
-        """Compute maintenance incentive + treasury weights from recent verified miners (DB),
-        then delegate to BaseValidatorNeuron.set_weights() which normalizes and submits on-chain.
-        If the treasury hotkey cannot be located, we refuse to set weights this round.
+        """Maintenance dust + ~99% to the JWT treasury sink, or JWT burn sink if the cap is hit.
+
+        The treasury sink must be on the metagraph every tempo (including burn
+        tempos) so funding can resume. If we should burn but the burn sink is
+        missing from the metagraph, fund the treasury sink (fail-safe).
         """
         try:
-            # Use numpy array (matching the clean template pattern) for scores
             n = len(self.metagraph.hotkeys)
             weights = np.zeros(n, dtype=np.float32)
 
-            # Get list of miners from db who have verified transactions within the last 3 weeks
             hotkeys_to_maintain: List[str] = self.database_connection.db_query.get_active_miners()
             if PRIVATE_MINER_HOTKEY not in hotkeys_to_maintain:
                 hotkeys_to_maintain.append(PRIVATE_MINER_HOTKEY)
 
-            # Platform-selected sink for this tempo (first key if missing/unknown).
-            # Idle sinks get the same keep-alive dust as maintenance miners so a
-            # full subnet cannot recycle them on tempos they are not the target.
-            treasury_hotkey = self._resolve_treasury_sink()
+            sink_hotkey, burn_sink_hotkey = self._resolve_weight_targets()
             present = set(self.metagraph.hotkeys)
-            for sink in sink_hotkeys():
+
+            if sink_hotkey not in present:
+                bt.logging.error(
+                    f"CRITICAL: Treasury hotkey {sink_hotkey} not found in current metagraph. "
+                    "Refusing to set weights this round to avoid emitting incorrect distribution. "
+                    f"Intended dust recipients: {len(hotkeys_to_maintain)} (including forced private miner)."
+                )
+                self.scores = weights
+                return
+
+            weight_recipient = sink_hotkey
+            recipient_label = "treasury sink"
+            cap_cfg = load_treasury_cap_config()
+            if cap_cfg.is_operational:
+                decision = decide_treasury_share(
+                    cap_cfg,
+                    client=self.platform_client,
+                    subtensor=self.subtensor,
+                    netuid=int(self.config.netuid),
+                    now=datetime.now(timezone.utc),
+                    treasury_coldkey=treasury_wallet_coldkey(
+                        self.metagraph, sink_hotkey
+                    ),
+                )
+                if decision.reason == "unknown_count":
+                    bt.logging.warning(
+                        "Prize-pool cap enabled but the active-challenge count could not be "
+                        "derived from the platform; funding treasury (fail-safe)."
+                    )
+                elif decision.reason == "unreadable_alpha":
+                    bt.logging.warning(
+                        "Prize-pool cap enabled but treasury alpha could not be read; "
+                        "funding treasury as usual (fail-safe)."
+                    )
+                elif decision.reason == "below_cap":
+                    bt.logging.info(
+                        f"Prize-pool cap: treasury alpha {decision.treasury_alpha:,.2f} "
+                        f"< cap {decision.effective_cap:,.2f} "
+                        f"({cap_cfg.alpha_per_challenge:,.0f} × {decision.active_challenges} "
+                        "active challenges); funding treasury."
+                    )
+                elif decision.burn:
+                    if burn_sink_hotkey in present:
+                        weight_recipient = burn_sink_hotkey
+                        recipient_label = "burn sink (prize-pool cap reached)"
+                        bt.logging.warning(
+                            f"🔥 Prize-pool cap reached: treasury alpha {decision.treasury_alpha:,.2f} "
+                            f">= cap {decision.effective_cap:,.2f} "
+                            f"({cap_cfg.alpha_per_challenge:,.0f} × {decision.active_challenges} "
+                            f"active challenges). Routing this tempo's share to burn sink "
+                            f"{burn_sink_hotkey} instead of treasury sink {sink_hotkey}."
+                        )
+                    else:
+                        bt.logging.error(
+                            f"Prize-pool cap reached (treasury alpha {decision.treasury_alpha:,.2f} "
+                            f">= {decision.effective_cap:,.2f}) but burn sink {burn_sink_hotkey} is not "
+                            "in the metagraph; funding treasury as usual (fail-safe)."
+                        )
+
+            for hk in (*sink_hotkeys(), *burn_sink_hotkeys()):
                 if (
-                    sink != treasury_hotkey
-                    and sink in present
-                    and sink not in hotkeys_to_maintain
+                    hk != weight_recipient
+                    and hk in present
+                    and hk not in hotkeys_to_maintain
                 ):
-                    hotkeys_to_maintain.append(sink)
+                    hotkeys_to_maintain.append(hk)
 
             n_maintain = len(hotkeys_to_maintain)
-
             floor = MIN_DUST_FLOOR if n_maintain > 0 else 0.0
             for uid, hotkey in enumerate(self.metagraph.hotkeys):
                 if hotkey in hotkeys_to_maintain:
                     weights[uid] = floor
 
-            mass_reserved_for_miners = floor * n_maintain
-            remaining = max(0.0, 1.0 - mass_reserved_for_miners)
+            remaining = max(0.0, 1.0 - floor * n_maintain)
+            weights[self.metagraph.hotkeys.index(weight_recipient)] = remaining
+            bt.logging.info(
+                f"Directing treasury share {remaining:.8f} to {recipient_label} "
+                f"({weight_recipient})."
+            )
 
-            treasury_assigned = remaining
-
-            # Prune old maintenance incentive rows from the db (always run for hygiene)
             self.database_connection.db_query.prune_old_miner_solutions()
 
-            # Set treasury weight by looking up its hotkey
-            treasury_uid = None
-            if treasury_hotkey in self.metagraph.hotkeys:
-                treasury_uid = self.metagraph.hotkeys.index(treasury_hotkey)
-                weights[treasury_uid] = treasury_assigned
-            else:
-                bt.logging.error(
-                    f"CRITICAL: Treasury hotkey {treasury_hotkey} not found in current metagraph. "
-                    "Refusing to set weights this round to avoid emitting incorrect distribution. "
-                    f"Intended dust recipients: {n_maintain} (including forced private miner)."
-                )
-
             self.scores = weights
-
             bt.logging.info(f"🔢 Setting weights: {self.scores}")
 
-            # Only proceed to on-chain set if we successfully placed the treasury weight
-            if treasury_uid is None:
-                return
-
-            # Helpful post-assignment visibility for the private miner (the one we care most about not losing)
-            if PRIVATE_MINER_HOTKEY in self.metagraph.hotkeys:
+            if PRIVATE_MINER_HOTKEY in present:
                 pm_uid = self.metagraph.hotkeys.index(PRIVATE_MINER_HOTKEY)
-                actual = float(weights[pm_uid])
                 bt.logging.info(
                     f"Private miner dust: {PRIVATE_MINER_HOTKEY} @ UID {pm_uid} "
-                    f"assigned {actual:.8f} (floor={floor:.8f}) before normalization."
+                    f"assigned {float(weights[pm_uid]):.8f} (floor={floor:.8f}) before normalization."
                 )
             else:
                 bt.logging.error(
@@ -466,7 +579,6 @@ class Validator(BaseValidatorNeuron):
                 bt.logging.warning("⚠️ No validator permit")
             else:
                 bt.logging.error(f"❌ Weight-setting error: {exc}", exc_info=True)
-            # Do not proceed to the on-chain set on hard failure paths
             return
 
         super().set_weights()

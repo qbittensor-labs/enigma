@@ -19,6 +19,8 @@ from qbittensor.utils.treasury_sinks import (
     DEFAULT_TREASURY_SINK_HOTKEY,
     TREASURY_SINK_HOTKEYS,
     resolve_sink_hotkey,
+    sink_jwt_needs_refresh,
+    treasury_wallet_coldkey,
 )
 
 
@@ -35,6 +37,54 @@ class TestResolveSinkHotkey:
     def test_accepts_listed_sink(self):
         listed = TREASURY_SINK_HOTKEYS[3]
         assert resolve_sink_hotkey(listed) == listed
+
+
+class TestTreasuryWalletColdkey:
+    def test_reads_coldkey_for_sink_uid(self):
+        sink = TREASURY_SINK_HOTKEYS[0]
+        mg = type("MG", (), {})()
+        mg.hotkeys = [sink, "miner"]
+        mg.coldkeys = ["5VaultColdkey", "5MinerColdkey"]
+        assert treasury_wallet_coldkey(mg, sink) == "5VaultColdkey"
+
+    def test_missing_sink_returns_none(self):
+        mg = type("MG", (), {})()
+        mg.hotkeys = ["miner"]
+        mg.coldkeys = ["5MinerColdkey"]
+        assert treasury_wallet_coldkey(mg, TREASURY_SINK_HOTKEYS[0]) is None
+
+
+class TestSinkJwtNeedsRefresh:
+    def test_missing_sink_needs_refresh(self):
+        assert sink_jwt_needs_refresh(
+            sink_hotkey=None, jwt_tempo_id=1, current_tempo_id=1
+        )
+
+    def test_unknown_sink_needs_refresh(self):
+        assert sink_jwt_needs_refresh(
+            sink_hotkey="5Nope", jwt_tempo_id=1, current_tempo_id=1
+        )
+
+    def test_stale_tempo_needs_refresh(self):
+        assert sink_jwt_needs_refresh(
+            sink_hotkey=TREASURY_SINK_HOTKEYS[1],
+            jwt_tempo_id=10,
+            current_tempo_id=11,
+        )
+
+    def test_current_valid_sink_does_not_refresh(self):
+        assert not sink_jwt_needs_refresh(
+            sink_hotkey=TREASURY_SINK_HOTKEYS[1],
+            jwt_tempo_id=10,
+            current_tempo_id=10,
+        )
+
+    def test_valid_sink_without_tempo_does_not_refresh(self):
+        assert not sink_jwt_needs_refresh(
+            sink_hotkey=TREASURY_SINK_HOTKEYS[1],
+            jwt_tempo_id=None,
+            current_tempo_id=10,
+        )
 
 
 class TestEnvOverride:
