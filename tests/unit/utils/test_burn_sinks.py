@@ -18,7 +18,6 @@
 from qbittensor.utils.burn_sinks import (
     BURN_SINK_HOTKEYS,
     DEFAULT_BURN_SINK_HOTKEY,
-    burn_sink_jwt_needs_refresh,
     resolve_burn_sink_hotkey,
 )
 
@@ -36,39 +35,6 @@ class TestResolveBurnSinkHotkey:
     def test_accepts_listed_burn_sink(self):
         listed = BURN_SINK_HOTKEYS[0]
         assert resolve_burn_sink_hotkey(listed) == listed
-
-
-class TestBurnSinkJwtNeedsRefresh:
-    def test_missing_needs_refresh(self):
-        assert burn_sink_jwt_needs_refresh(
-            burn_sink_hotkey=None, jwt_tempo_id=1, current_tempo_id=1
-        )
-
-    def test_unknown_needs_refresh(self):
-        assert burn_sink_jwt_needs_refresh(
-            burn_sink_hotkey="5Nope", jwt_tempo_id=1, current_tempo_id=1
-        )
-
-    def test_stale_tempo_needs_refresh(self):
-        assert burn_sink_jwt_needs_refresh(
-            burn_sink_hotkey=BURN_SINK_HOTKEYS[0],
-            jwt_tempo_id=10,
-            current_tempo_id=11,
-        )
-
-    def test_current_valid_sink_does_not_refresh(self):
-        assert not burn_sink_jwt_needs_refresh(
-            burn_sink_hotkey=BURN_SINK_HOTKEYS[0],
-            jwt_tempo_id=10,
-            current_tempo_id=10,
-        )
-
-    def test_valid_sink_without_tempo_does_not_refresh(self):
-        assert not burn_sink_jwt_needs_refresh(
-            burn_sink_hotkey=BURN_SINK_HOTKEYS[0],
-            jwt_tempo_id=None,
-            current_tempo_id=10,
-        )
 
 
 class TestEnvOverride:

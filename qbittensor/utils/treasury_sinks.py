@@ -86,17 +86,3 @@ def treasury_wallet_coldkey(metagraph, sink_hotkey: str) -> Optional[str]:
     except Exception:
         return None
     return None
-
-
-def sink_jwt_needs_refresh(
-    *,
-    sink_hotkey: Optional[str],
-    jwt_tempo_id: Optional[int],
-    current_tempo_id: Optional[int],
-) -> bool:
-    """True when the cached JWT has no usable sink or is from a prior tempo."""
-    if not (isinstance(sink_hotkey, str) and sink_hotkey in sink_set()):
-        return True
-    if isinstance(jwt_tempo_id, int) and isinstance(current_tempo_id, int):
-        return jwt_tempo_id != current_tempo_id
-    return False

@@ -26,6 +26,7 @@ from neurons.validator import (
     PRIVATE_MINER_HOTKEY,
     TREASURY_HOTKEY,
     MIN_DUST_FLOOR,
+    WEIGHTS_MIN_INTERVAL_BLOCKS,
     Validator,
 )
 from qbittensor.utils.treasury_sinks import TREASURY_SINK_HOTKEYS
@@ -522,7 +523,7 @@ class TestSetWeights:
         rm.refresh_jwt.assert_called_once()
         mock_super.assert_called_once()
 
-    def test_set_weights_defaults_to_first_when_platform_sink_unknown(self, mock_validator):
+    def test_set_weights_skips_chain_when_platform_sink_unknown(self, mock_validator):
         unknown = "5NotATreasurySinkHotkeyXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
         mock_validator.metagraph.hotkeys = [TREASURY_HOTKEY, unknown, PRIVATE_MINER_HOTKEY]
         mock_validator.database_connection.db_query.get_active_miners.return_value = []
@@ -531,14 +532,9 @@ class TestSetWeights:
         with patch("neurons.validator.BaseValidatorNeuron.set_weights") as mock_super:
             mock_validator.set_weights()
 
-        weights = mock_validator.scores
-        default_uid = mock_validator.metagraph.hotkeys.index(TREASURY_HOTKEY)
-        unknown_uid = mock_validator.metagraph.hotkeys.index(unknown)
-        assert weights[default_uid] >= 0.999
-        assert weights[unknown_uid] == 0.0
-        mock_super.assert_called_once()
+        mock_super.assert_not_called()
 
-    def test_set_weights_defaults_to_first_when_sink_missing(self, mock_validator):
+    def test_set_weights_skips_chain_when_sink_missing(self, mock_validator):
         mock_validator.metagraph.hotkeys = [TREASURY_HOTKEY, "miner1", PRIVATE_MINER_HOTKEY]
         mock_validator.database_connection.db_query.get_active_miners.return_value = []
         self._stub_sink_jwt(mock_validator, error=RuntimeError("tensorauth down"))
@@ -546,12 +542,9 @@ class TestSetWeights:
         with patch("neurons.validator.BaseValidatorNeuron.set_weights") as mock_super:
             mock_validator.set_weights()
 
-        weights = mock_validator.scores
-        default_uid = mock_validator.metagraph.hotkeys.index(TREASURY_HOTKEY)
-        assert weights[default_uid] >= 0.999
-        mock_super.assert_called_once()
+        mock_super.assert_not_called()
 
-    def test_set_weights_defaults_when_request_manager_missing(self, mock_validator):
+    def test_set_weights_skips_chain_when_request_manager_missing(self, mock_validator):
         mock_validator.metagraph.hotkeys = [TREASURY_HOTKEY, "miner1", PRIVATE_MINER_HOTKEY]
         mock_validator.database_connection.db_query.get_active_miners.return_value = []
         mock_validator.platform_client.request_manager = None
@@ -559,31 +552,32 @@ class TestSetWeights:
         with patch("neurons.validator.BaseValidatorNeuron.set_weights") as mock_super:
             mock_validator.set_weights()
 
-        weights = mock_validator.scores
-        assert weights[mock_validator.metagraph.hotkeys.index(TREASURY_HOTKEY)] >= 0.999
-        mock_super.assert_called_once()
+        mock_super.assert_not_called()
 
-    def test_set_weights_refreshes_jwt_when_tempo_changes(self, mock_validator):
-        old_sink = TREASURY_SINK_HOTKEYS[1]
-        new_sink = TREASURY_SINK_HOTKEYS[3]
-        mock_validator.metagraph.hotkeys = [old_sink, new_sink, PRIVATE_MINER_HOTKEY]
+    def test_set_weights_always_refreshes_jwt(self, mock_validator):
+        """Cached JWT is ignored even when it looks current, including default sink."""
+        cached_sink = TREASURY_SINK_HOTKEYS[0]
+        live_sink = TREASURY_SINK_HOTKEYS[2]
+        mock_validator.metagraph.hotkeys = [
+            cached_sink, live_sink, PRIVATE_MINER_HOTKEY
+        ]
         mock_validator.database_connection.db_query.get_active_miners.return_value = []
 
-        stale = Mock()
-        stale.sink_hotkey = old_sink
-        stale.burn_hotkey = BURN_SINK_HOTKEYS[0]
-        stale.tempo_id = 1
+        cached = Mock()
+        cached.sink_hotkey = cached_sink
+        cached.burn_hotkey = BURN_SINK_HOTKEYS[0]
+        cached.tempo_id = 2
         rm = self._stub_sink_jwt(
-            mock_validator, new_sink, BURN_SINK_HOTKEYS[0], tempo_id=2, cached_jwt=stale
+            mock_validator, live_sink, BURN_SINK_HOTKEYS[0], tempo_id=2, cached_jwt=cached
         )
-        mock_validator.subtensor.block = 720  # tempo 2
+        mock_validator.subtensor.block = 720  # tempo 2 — cache would look fresh
 
         with patch("neurons.validator.BaseValidatorNeuron.set_weights") as mock_super:
             mock_validator.set_weights()
 
         weights = mock_validator.scores
-        assert weights[mock_validator.metagraph.hotkeys.index(new_sink)] >= 0.999
-        assert weights[mock_validator.metagraph.hotkeys.index(old_sink)] >= MIN_DUST_FLOOR
+        assert weights[mock_validator.metagraph.hotkeys.index(live_sink)] >= 0.999
+        assert weights[mock_validator.metagraph.hotkeys.index(cached_sink)] >= MIN_DUST_FLOOR
         rm.refresh_jwt.assert_called_once()
         mock_super.assert_called_once()
 
@@ -638,7 +632,6 @@ class TestSetWeights:
             BaseValidatorNeuron.set_weights(mock_validator)
 
         assert mock_validator.metagraph.last_update[0] == 500
-        assert mock_validator.should_set_weights() is False
 
     def test_failed_set_weights_does_not_stamp_last_update(self, mock_validator):
         from qbittensor.base.validator import BaseValidatorNeuron
@@ -664,7 +657,6 @@ class TestSetWeights:
             BaseValidatorNeuron.set_weights(mock_validator)
 
         assert mock_validator.metagraph.last_update[0] == 0
-        assert mock_validator.should_set_weights() is True
 
     def test_set_weights_execute_exception_does_not_stamp(self, mock_validator):
         from qbittensor.base.validator import BaseValidatorNeuron
@@ -724,6 +716,118 @@ class TestSetWeights:
         mock_validator.metagraph.last_update = None
         mock_validator.subtensor.block = 9
         BaseValidatorNeuron._mark_local_weights_submitted(mock_validator)
+
+    def test_successful_emit_records_recipient(self, mock_validator):
+        mock_validator.uid = 0
+        mock_validator.step = 1
+        mock_validator.metagraph.hotkeys = [TREASURY_HOTKEY, PRIVATE_MINER_HOTKEY]
+        mock_validator.metagraph.last_update = [0, 0]
+        mock_validator.subtensor.block = 500
+        mock_validator.subtensor.execute.return_value = Mock(success=True, error=None)
+        self._stub_sink_jwt(mock_validator, TREASURY_HOTKEY)
+
+        with (
+            patch(
+                "qbittensor.base.validator.process_weights_for_netuid",
+                return_value=(np.array([0]), np.array([1.0])),
+            ),
+            patch(
+                "qbittensor.base.validator.convert_weights_and_uids_for_emit",
+                return_value=([0], [1.0]),
+            ),
+        ):
+            mock_validator.set_weights()
+
+        assert mock_validator._last_emitted_recipient == TREASURY_HOTKEY
+        assert mock_validator.metagraph.last_update[0] == 500
+
+
+class TestShouldSetWeights:
+    def _ready(self, mock_validator, *, block=720, last_update=0, sink=None):
+        mock_validator.uid = 0
+        mock_validator.step = 1
+        mock_validator.subtensor.block = block
+        mock_validator.metagraph.last_update = [last_update, 0, 0]
+        sink = sink or TREASURY_SINK_HOTKEYS[2]
+        mock_validator.metagraph.hotkeys = [sink, TREASURY_HOTKEY, PRIVATE_MINER_HOTKEY]
+        TestSetWeights._stub_sink_jwt(mock_validator, sink)
+        return sink
+
+    def test_step_zero_never_sets(self, mock_validator):
+        self._ready(mock_validator)
+        mock_validator.step = 0
+        assert mock_validator.should_set_weights() is False
+
+    def test_first_jwt_claim_sets(self, mock_validator):
+        sink = self._ready(mock_validator)
+        assert mock_validator.should_set_weights() is True
+        assert mock_validator._planned_weight_targets.recipient == sink
+
+    def test_same_recipient_skips(self, mock_validator):
+        sink = self._ready(mock_validator, last_update=0, block=720)
+        mock_validator._last_emitted_recipient = sink
+        mock_validator._last_seen_tempo = 720 // 360
+        assert mock_validator.should_set_weights() is False
+
+    def test_new_sink_after_tempo_change_sets(self, mock_validator):
+        old = TREASURY_SINK_HOTKEYS[0]
+        new = TREASURY_SINK_HOTKEYS[2]
+        self._ready(mock_validator, block=720, last_update=710, sink=new)
+        mock_validator._last_emitted_recipient = old
+        mock_validator._last_seen_tempo = 1  # previous tempo
+        assert mock_validator.should_set_weights() is True
+        assert mock_validator._planned_weight_targets.recipient == new
+
+    def test_cooldown_skips_even_if_sink_changed(self, mock_validator):
+        old = TREASURY_SINK_HOTKEYS[0]
+        new = TREASURY_SINK_HOTKEYS[2]
+        self._ready(mock_validator, block=714, last_update=710, sink=new)
+        mock_validator._last_emitted_recipient = old
+        mock_validator._last_seen_tempo = 1
+        assert (714 - 710) < WEIGHTS_MIN_INTERVAL_BLOCKS
+        assert mock_validator.should_set_weights() is False
+
+    def test_missing_jwt_does_not_set(self, mock_validator):
+        self._ready(mock_validator)
+        TestSetWeights._stub_sink_jwt(
+            mock_validator, error=RuntimeError("tensorauth down")
+        )
+        assert mock_validator.should_set_weights() is False
+
+    def test_unknown_jwt_sink_does_not_set(self, mock_validator):
+        self._ready(mock_validator)
+        TestSetWeights._stub_sink_jwt(mock_validator, "5NotATreasurySink")
+        assert mock_validator.should_set_weights() is False
+
+    def test_burn_switch_counts_as_change(self, mock_validator, monkeypatch):
+        monkeypatch.setenv("TREASURY_CAP_ENABLED", "1")
+        sink = self._ready(mock_validator, block=720, last_update=0)
+        mock_validator._last_emitted_recipient = sink
+        mock_validator._last_seen_tempo = 720 // 360
+        mock_validator.metagraph.hotkeys = [sink, BURN_SINK_HOTKEYS[0], PRIVATE_MINER_HOTKEY]
+        TestSetWeights._stub_sink_jwt(mock_validator, sink, BURN_SINK_HOTKEYS[0])
+        decision = CapDecision(
+            burn=True,
+            reason="at_cap",
+            active_challenges=1,
+            treasury_alpha=400_000.0,
+            effective_cap=200_000.0,
+        )
+        with patch("neurons.validator.decide_treasury_share", return_value=decision):
+            # same tempo + cap on + elapsed > epoch_length (720-0)
+            assert mock_validator.should_set_weights() is True
+            assert (
+                mock_validator._planned_weight_targets.recipient
+                == BURN_SINK_HOTKEYS[0]
+            )
+
+    def test_same_tempo_without_cap_does_not_refresh(self, mock_validator):
+        sink = self._ready(mock_validator, block=720, last_update=0)
+        mock_validator._last_emitted_recipient = sink
+        mock_validator._last_seen_tempo = 720 // 360
+        rm = mock_validator.platform_client.request_manager
+        assert mock_validator.should_set_weights() is False
+        rm.refresh_jwt.assert_not_called()
 
 
 class TestResyncAndScores:

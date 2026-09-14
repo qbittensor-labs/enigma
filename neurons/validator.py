@@ -18,6 +18,7 @@
 
 import asyncio
 import os
+from dataclasses import dataclass
 from typing import Any, List
 import time
 from datetime import datetime, timezone
@@ -48,13 +49,11 @@ from qbittensor.utils.treasury_sinks import (
     default_sink_hotkey,
     resolve_sink_hotkey,
     sink_hotkeys,
-    sink_jwt_needs_refresh,
     sink_set,
     treasury_wallet_coldkey,
 )
 from qbittensor.utils.burn_sinks import (
     burn_sink_hotkeys,
-    burn_sink_jwt_needs_refresh,
     burn_sink_set,
     resolve_burn_sink_hotkey,
 )
@@ -65,6 +64,21 @@ PRIVATE_MINER_HOTKEY: str = os.environ.get(
     "PRIVATE_MINER_HOTKEY", "5HmQDNh8BrbDeT1bjgqXZ3KGAEb9n6doozNL2mQiJ9rYmuqh"
 )
 MIN_DUST_FLOOR: float = 2.5e-5
+# Flap guard after a successful emit. epoch_length is NOT used as the set_weights
+# trigger — that independent clock is what desynced validators across tempos.
+WEIGHTS_MIN_INTERVAL_BLOCKS: int = 5
+DEFAULT_TEMPO_LENGTH: int = 360
+
+
+@dataclass(frozen=True)
+class WeightPlan:
+    """Intended on-chain weight recipient for this tick."""
+
+    sink_hotkey: str
+    burn_sink_hotkey: str
+    recipient: str
+    recipient_label: str
+    from_jwt: bool
 
 
 class Validator(BaseValidatorNeuron):
@@ -181,6 +195,11 @@ class Validator(BaseValidatorNeuron):
 
         # Persistent loop for the validator background thread (see _run_async).
         self._async_loop: asyncio.AbstractEventLoop | None = None
+
+        self._last_emitted_recipient: str | None = None
+        self._last_seen_tempo: int | None = None
+        self._planned_weight_targets: WeightPlan | None = None
+        self._pending_recipient: str | None = None
 
     def _ensure_async_loop(self) -> asyncio.AbstractEventLoop:
         if self._async_loop is None or self._async_loop.is_closed():
@@ -371,7 +390,7 @@ class Validator(BaseValidatorNeuron):
     def _current_tempo_id(self) -> int | None:
         """Current chain tempo index, or None if it cannot be read."""
         try:
-            tempo = 360
+            tempo = DEFAULT_TEMPO_LENGTH
             try:
                 info = self.subtensor.subnets.info(self.config.netuid)
                 raw = getattr(info, "tempo", None)
@@ -379,94 +398,206 @@ class Validator(BaseValidatorNeuron):
                     tempo = raw
             except Exception:
                 pass
-            block = getattr(self.subtensor, "block", None)
-            if not isinstance(block, int):
-                raw_block = getattr(self, "block", None)
-                if not isinstance(raw_block, int):
-                    return None
-                block = raw_block
+            block = int(self.block)
             if tempo <= 0:
                 return None
-            return int(block) // tempo
+            return block // tempo
         except Exception:
             return None
 
-    def _resolve_weight_targets(self) -> tuple[str, str]:
-        """JWT treasury sink and burn sink, allowlist-checked, for this tempo.
+    def _blocks_since_last_update(self) -> int | None:
+        try:
+            return int(self.block) - int(self.metagraph.last_update[self.uid])
+        except Exception:
+            return None
 
-        Refreshes the cached JWT when either key is missing/unknown or the
-        token's tempo_id is stale. Unknown claims fall back to the first
-        listed treasury / burn sink.
+    def _fetch_jwt_claims(self) -> tuple[str | None, str | None]:
+        """Refresh tensorauth and return allowlisted sink/burn claims.
+
+        Missing, unknown, or failed claims are None — callers must not treat
+        the hardcoded fallback sink as a platform pick.
         """
         rm = getattr(getattr(self, "platform_client", None), "request_manager", None)
-        jwt = getattr(rm, "jwt", None) if rm is not None else None
-        jwt_sink = getattr(jwt, "sink_hotkey", None)
-        jwt_burn_sink = getattr(jwt, "burn_hotkey", None)
-        jwt_tempo = getattr(jwt, "tempo_id", None)
-        if not isinstance(jwt_sink, str):
-            jwt_sink = None
-        if not isinstance(jwt_burn_sink, str):
-            jwt_burn_sink = None
-        if not isinstance(jwt_tempo, int):
-            jwt_tempo = None
-
-        current_tempo = self._current_tempo_id()
-        needs_refresh = sink_jwt_needs_refresh(
-            sink_hotkey=jwt_sink,
-            jwt_tempo_id=jwt_tempo,
-            current_tempo_id=current_tempo,
-        ) or burn_sink_jwt_needs_refresh(
-            burn_sink_hotkey=jwt_burn_sink,
-            jwt_tempo_id=jwt_tempo,
-            current_tempo_id=current_tempo,
-        )
-
-        if rm is not None and needs_refresh:
-            try:
-                refresh = getattr(rm, "refresh_jwt", None)
-                jwt = refresh() if callable(refresh) else None
-                jwt_sink = getattr(jwt, "sink_hotkey", None)
-                jwt_burn_sink = getattr(jwt, "burn_hotkey", None)
-                if not isinstance(jwt_sink, str):
-                    jwt_sink = None
-                if not isinstance(jwt_burn_sink, str):
-                    jwt_burn_sink = None
-            except Exception as exc:
-                bt.logging.warning(f"Could not refresh platform sink JWT: {exc}")
-
-        sink = resolve_sink_hotkey(jwt_sink, fallback=TREASURY_HOTKEY)
-        burn_sink = resolve_burn_sink_hotkey(jwt_burn_sink)
+        jwt_sink = None
+        jwt_burn_sink = None
+        if rm is None:
+            return None, None
+        try:
+            refresh = getattr(rm, "refresh_jwt", None)
+            jwt = refresh() if callable(refresh) else None
+            jwt_sink = getattr(jwt, "sink_hotkey", None)
+            jwt_burn_sink = getattr(jwt, "burn_hotkey", None)
+            if not isinstance(jwt_sink, str):
+                jwt_sink = None
+            if not isinstance(jwt_burn_sink, str):
+                jwt_burn_sink = None
+        except Exception as exc:
+            bt.logging.warning(f"Could not refresh platform sink JWT: {exc}")
+            return None, None
 
         if jwt_sink and jwt_sink not in sink_set():
             bt.logging.warning(
-                f"Platform sink {jwt_sink} is not in the treasury sink list; "
-                f"defaulting to {sink}"
+                f"Platform sink {jwt_sink} is not in the treasury sink list; ignoring claim."
             )
-        elif not jwt_sink:
-            bt.logging.warning(f"No platform sink available; defaulting to {sink}")
-        else:
-            bt.logging.info(f"Treasury sink for this tempo: {sink}")
-
+            jwt_sink = None
         if jwt_burn_sink and jwt_burn_sink not in burn_sink_set():
             bt.logging.warning(
-                f"Platform burn sink {jwt_burn_sink} is not in the burn sink list; "
-                f"defaulting to {burn_sink}"
+                f"Platform burn sink {jwt_burn_sink} is not in the burn sink list; ignoring claim."
             )
-        elif not jwt_burn_sink:
-            bt.logging.warning(f"No platform burn sink available; defaulting to {burn_sink}")
-        else:
-            bt.logging.info(f"Burn sink for this tempo: {burn_sink}")
+            jwt_burn_sink = None
+        return jwt_sink, jwt_burn_sink
 
-        return sink, burn_sink
+    def _plan_weight_targets(self) -> WeightPlan:
+        """JWT treasury/burn claims plus prize-pool cap routing for this tick."""
+        jwt_sink, jwt_burn_sink = self._fetch_jwt_claims()
+        from_jwt = jwt_sink is not None
+        sink = resolve_sink_hotkey(jwt_sink, fallback=TREASURY_HOTKEY)
+        burn_sink = resolve_burn_sink_hotkey(jwt_burn_sink)
+
+        if from_jwt:
+            bt.logging.info(f"Treasury sink for this tempo: {sink}")
+        else:
+            bt.logging.warning(
+                f"No platform sink available; not emitting fallback {sink}."
+            )
+
+        if jwt_burn_sink:
+            bt.logging.info(f"Burn sink for this tempo: {burn_sink}")
+        else:
+            bt.logging.warning(
+                f"No platform burn sink available; defaulting to {burn_sink}"
+            )
+
+        recipient = sink
+        recipient_label = "treasury sink"
+        present = set(self.metagraph.hotkeys)
+        cap_cfg = load_treasury_cap_config()
+        if from_jwt and cap_cfg.is_operational:
+            decision = decide_treasury_share(
+                cap_cfg,
+                client=self.platform_client,
+                subtensor=self.subtensor,
+                netuid=int(self.config.netuid),
+                now=datetime.now(timezone.utc),
+                treasury_coldkey=treasury_wallet_coldkey(self.metagraph, sink),
+            )
+            if decision.reason == "unknown_count":
+                bt.logging.warning(
+                    "Prize-pool cap enabled but the active-challenge count could not be "
+                    "derived from the platform; funding treasury (fail-safe)."
+                )
+            elif decision.reason == "unreadable_alpha":
+                bt.logging.warning(
+                    "Prize-pool cap enabled but treasury alpha could not be read; "
+                    "funding treasury as usual (fail-safe)."
+                )
+            elif decision.reason == "below_cap":
+                bt.logging.info(
+                    f"Prize-pool cap: treasury alpha {decision.treasury_alpha:,.2f} "
+                    f"< cap {decision.effective_cap:,.2f} "
+                    f"({cap_cfg.alpha_per_challenge:,.0f} × {decision.active_challenges} "
+                    "active challenges); funding treasury."
+                )
+            elif decision.burn:
+                if burn_sink in present:
+                    recipient = burn_sink
+                    recipient_label = "burn sink (prize-pool cap reached)"
+                    bt.logging.warning(
+                        f"🔥 Prize-pool cap reached: treasury alpha {decision.treasury_alpha:,.2f} "
+                        f">= cap {decision.effective_cap:,.2f} "
+                        f"({cap_cfg.alpha_per_challenge:,.0f} × {decision.active_challenges} "
+                        f"active challenges). Routing this tempo's share to burn sink "
+                        f"{burn_sink} instead of treasury sink {sink}."
+                    )
+                else:
+                    bt.logging.error(
+                        f"Prize-pool cap reached (treasury alpha {decision.treasury_alpha:,.2f} "
+                        f">= {decision.effective_cap:,.2f}) but burn sink {burn_sink} is not "
+                        "in the metagraph; funding treasury as usual (fail-safe)."
+                    )
+
+        return WeightPlan(
+            sink_hotkey=sink,
+            burn_sink_hotkey=burn_sink,
+            recipient=recipient,
+            recipient_label=recipient_label,
+            from_jwt=from_jwt,
+        )
+
+    def should_set_weights(self) -> bool:
+        """Emit when the JWT/cap recipient changes, not on epoch_length.
+
+        epoch_length is only a mid-tempo poll for prize-pool cap flips.
+        A short block cooldown prevents double-submit if a token flaps.
+        Fallback (no/unknown JWT sink) never triggers an emit.
+        """
+        if self.step == 0:
+            return False
+        if getattr(self.config.neuron, "disable_set_weights", False):
+            return False
+
+        elapsed = self._blocks_since_last_update()
+        if (
+            self._last_emitted_recipient is not None
+            and elapsed is not None
+            and elapsed < WEIGHTS_MIN_INTERVAL_BLOCKS
+        ):
+            return False
+
+        tempo = self._current_tempo_id()
+        same_tempo = (
+            self._last_emitted_recipient is not None
+            and tempo is not None
+            and tempo == self._last_seen_tempo
+        )
+        cap_on = load_treasury_cap_config().is_operational
+        epoch_length = int(getattr(self.config.neuron, "epoch_length", 100) or 100)
+        if same_tempo and not cap_on:
+            return False
+        if same_tempo and cap_on and elapsed is not None and elapsed <= epoch_length:
+            return False
+
+        plan = self._plan_weight_targets()
+        self._planned_weight_targets = plan
+        if tempo is not None:
+            self._last_seen_tempo = tempo
+        if not plan.from_jwt:
+            return False
+        if plan.recipient == self._last_emitted_recipient:
+            bt.logging.debug(
+                f"Weight recipient unchanged ({plan.recipient}); skip set_weights."
+            )
+            return False
+        return True
+
+    def _mark_local_weights_submitted(self) -> None:
+        super()._mark_local_weights_submitted()
+        if self._pending_recipient:
+            self._last_emitted_recipient = self._pending_recipient
+            bt.logging.info(
+                f"Recorded emitted weight recipient {self._last_emitted_recipient}"
+            )
+            self._pending_recipient = None
 
     def set_weights(self):
         """Maintenance dust + ~99% to the JWT treasury sink, or JWT burn sink if the cap is hit.
 
+        Only submits when the plan came from a real tensorauth sink claim.
         The treasury sink must be on the metagraph every tempo (including burn
         tempos) so funding can resume. If we should burn but the burn sink is
         missing from the metagraph, fund the treasury sink (fail-safe).
         """
         try:
+            plan = self._planned_weight_targets
+            self._planned_weight_targets = None
+            if plan is None:
+                plan = self._plan_weight_targets()
+            if not plan.from_jwt:
+                bt.logging.warning(
+                    "No platform sink claim; skipping set_weights (will not emit fallback)."
+                )
+                return
+
             n = len(self.metagraph.hotkeys)
             weights = np.zeros(n, dtype=np.float32)
 
@@ -474,7 +605,10 @@ class Validator(BaseValidatorNeuron):
             if PRIVATE_MINER_HOTKEY not in hotkeys_to_maintain:
                 hotkeys_to_maintain.append(PRIVATE_MINER_HOTKEY)
 
-            sink_hotkey, burn_sink_hotkey = self._resolve_weight_targets()
+            sink_hotkey = plan.sink_hotkey
+            burn_sink_hotkey = plan.burn_sink_hotkey
+            weight_recipient = plan.recipient
+            recipient_label = plan.recipient_label
             present = set(self.metagraph.hotkeys)
 
             if sink_hotkey not in present:
@@ -485,55 +619,6 @@ class Validator(BaseValidatorNeuron):
                 )
                 self.scores = weights
                 return
-
-            weight_recipient = sink_hotkey
-            recipient_label = "treasury sink"
-            cap_cfg = load_treasury_cap_config()
-            if cap_cfg.is_operational:
-                decision = decide_treasury_share(
-                    cap_cfg,
-                    client=self.platform_client,
-                    subtensor=self.subtensor,
-                    netuid=int(self.config.netuid),
-                    now=datetime.now(timezone.utc),
-                    treasury_coldkey=treasury_wallet_coldkey(
-                        self.metagraph, sink_hotkey
-                    ),
-                )
-                if decision.reason == "unknown_count":
-                    bt.logging.warning(
-                        "Prize-pool cap enabled but the active-challenge count could not be "
-                        "derived from the platform; funding treasury (fail-safe)."
-                    )
-                elif decision.reason == "unreadable_alpha":
-                    bt.logging.warning(
-                        "Prize-pool cap enabled but treasury alpha could not be read; "
-                        "funding treasury as usual (fail-safe)."
-                    )
-                elif decision.reason == "below_cap":
-                    bt.logging.info(
-                        f"Prize-pool cap: treasury alpha {decision.treasury_alpha:,.2f} "
-                        f"< cap {decision.effective_cap:,.2f} "
-                        f"({cap_cfg.alpha_per_challenge:,.0f} × {decision.active_challenges} "
-                        "active challenges); funding treasury."
-                    )
-                elif decision.burn:
-                    if burn_sink_hotkey in present:
-                        weight_recipient = burn_sink_hotkey
-                        recipient_label = "burn sink (prize-pool cap reached)"
-                        bt.logging.warning(
-                            f"🔥 Prize-pool cap reached: treasury alpha {decision.treasury_alpha:,.2f} "
-                            f">= cap {decision.effective_cap:,.2f} "
-                            f"({cap_cfg.alpha_per_challenge:,.0f} × {decision.active_challenges} "
-                            f"active challenges). Routing this tempo's share to burn sink "
-                            f"{burn_sink_hotkey} instead of treasury sink {sink_hotkey}."
-                        )
-                    else:
-                        bt.logging.error(
-                            f"Prize-pool cap reached (treasury alpha {decision.treasury_alpha:,.2f} "
-                            f">= {decision.effective_cap:,.2f}) but burn sink {burn_sink_hotkey} is not "
-                            "in the metagraph; funding treasury as usual (fail-safe)."
-                        )
 
             for hk in (*sink_hotkeys(), *burn_sink_hotkeys()):
                 if (
@@ -581,6 +666,7 @@ class Validator(BaseValidatorNeuron):
                 bt.logging.error(f"❌ Weight-setting error: {exc}", exc_info=True)
             return
 
+        self._pending_recipient = weight_recipient
         super().set_weights()
 
     def save_state(self):

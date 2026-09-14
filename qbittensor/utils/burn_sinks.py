@@ -66,17 +66,3 @@ def resolve_burn_sink_hotkey(
     if isinstance(fallback, str) and fallback:
         return fallback
     return keys[0]
-
-
-def burn_sink_jwt_needs_refresh(
-    *,
-    burn_sink_hotkey: Optional[str],
-    jwt_tempo_id: Optional[int],
-    current_tempo_id: Optional[int],
-) -> bool:
-    """True when the cached JWT has no usable burn sink or is from a prior tempo."""
-    if not (isinstance(burn_sink_hotkey, str) and burn_sink_hotkey in burn_sink_set()):
-        return True
-    if isinstance(jwt_tempo_id, int) and isinstance(current_tempo_id, int):
-        return jwt_tempo_id != current_tempo_id
-    return False

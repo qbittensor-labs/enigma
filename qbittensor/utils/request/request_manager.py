@@ -64,7 +64,7 @@ class RequestManager:
         return self._jwt
 
     def refresh_jwt(self) -> JWT:
-        """Force a new tensorauth token (used when the cached JWT spans a tempo)."""
+        """Force a new tensorauth token."""
         self._jwt = self._jwt_manager.get_jwt()
         return self._jwt
 
