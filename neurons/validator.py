@@ -64,10 +64,9 @@ PRIVATE_MINER_HOTKEY: str = os.environ.get(
     "PRIVATE_MINER_HOTKEY", "5HmQDNh8BrbDeT1bjgqXZ3KGAEb9n6doozNL2mQiJ9rYmuqh"
 )
 MIN_DUST_FLOOR: float = 2.5e-5
-# Flap guard after a successful emit. epoch_length is NOT used as the set_weights
-# trigger — that independent clock is what desynced validators across tempos.
-WEIGHTS_MIN_INTERVAL_BLOCKS: int = 5
-DEFAULT_TEMPO_LENGTH: int = 360
+JWT_POLL_INTERVAL_BLOCKS: int = 5
+RETRY_INTERVAL_BLOCKS: int = 5
+DEFAULT_WEIGHTS_RATE_LIMIT: int = 100
 
 
 @dataclass(frozen=True)
@@ -197,9 +196,11 @@ class Validator(BaseValidatorNeuron):
         self._async_loop: asyncio.AbstractEventLoop | None = None
 
         self._last_emitted_recipient: str | None = None
-        self._last_seen_tempo: int | None = None
+        self._outstanding_recipient: str | None = None
         self._planned_weight_targets: WeightPlan | None = None
         self._pending_recipient: str | None = None
+        self._last_jwt_poll_block: int | None = None
+        self._last_submit_attempt_block: int | None = None
 
     def _ensure_async_loop(self) -> asyncio.AbstractEventLoop:
         if self._async_loop is None or self._async_loop.is_closed():
@@ -387,23 +388,27 @@ class Validator(BaseValidatorNeuron):
                 submission_statuses=None,
             )
 
-    def _current_tempo_id(self) -> int | None:
-        """Current chain tempo index, or None if it cannot be read."""
+    def _current_block(self) -> int | None:
         try:
-            tempo = DEFAULT_TEMPO_LENGTH
-            try:
-                info = self.subtensor.subnets.info(self.config.netuid)
-                raw = getattr(info, "tempo", None)
-                if isinstance(raw, int) and raw > 0:
-                    tempo = raw
-            except Exception:
-                pass
-            block = int(self.block)
-            if tempo <= 0:
-                return None
-            return block // tempo
+            return int(self.block)
         except Exception:
             return None
+
+    def _weights_rate_limit(self) -> int:
+        """Chain WeightsSetRateLimit, or the mainnet default of 100."""
+        try:
+            hp = getattr(self.subtensor, "hyperparameters", None)
+            for name in ("weights_rate_limit", "weights_set_rate_limit"):
+                fn = getattr(hp, name, None)
+                if callable(fn):
+                    val = fn(netuid=self.config.netuid)
+                else:
+                    val = fn
+                if isinstance(val, int) and val > 0:
+                    return val
+        except Exception:
+            pass
+        return DEFAULT_WEIGHTS_RATE_LIMIT
 
     def _blocks_since_last_update(self) -> int | None:
         try:
@@ -525,47 +530,55 @@ class Validator(BaseValidatorNeuron):
         )
 
     def should_set_weights(self) -> bool:
-        """Emit when the JWT/cap recipient changes, not on epoch_length.
+        """Emit while the JWT/cap recipient differs from the last successful emit.
 
-        epoch_length is only a mid-tempo poll for prize-pool cap flips.
-        A short block cooldown prevents double-submit if a token flaps.
-        Fallback (no/unknown JWT sink) never triggers an emit.
+        A failed submit does not close the window — we retry until the chain
+        accepts, the JWT claim moves on, or weights_rate_limit says wait.
+        Local block//tempo is not used as a gate (nodes disagree at wraps).
         """
         if self.step == 0:
             return False
         if getattr(self.config.neuron, "disable_set_weights", False):
             return False
 
-        elapsed = self._blocks_since_last_update()
-        if (
-            self._last_emitted_recipient is not None
-            and elapsed is not None
-            and elapsed < WEIGHTS_MIN_INTERVAL_BLOCKS
-        ):
-            return False
-
-        tempo = self._current_tempo_id()
-        same_tempo = (
-            self._last_emitted_recipient is not None
-            and tempo is not None
-            and tempo == self._last_seen_tempo
+        block = self._current_block()
+        idle = self._outstanding_recipient is None
+        recently_polled = (
+            block is not None
+            and self._last_jwt_poll_block is not None
+            and (block - self._last_jwt_poll_block) < JWT_POLL_INTERVAL_BLOCKS
         )
-        cap_on = load_treasury_cap_config().is_operational
-        epoch_length = int(getattr(self.config.neuron, "epoch_length", 100) or 100)
-        if same_tempo and not cap_on:
-            return False
-        if same_tempo and cap_on and elapsed is not None and elapsed <= epoch_length:
+        if idle and recently_polled:
             return False
 
         plan = self._plan_weight_targets()
         self._planned_weight_targets = plan
-        if tempo is not None:
-            self._last_seen_tempo = tempo
+        if block is not None:
+            self._last_jwt_poll_block = block
         if not plan.from_jwt:
             return False
         if plan.recipient == self._last_emitted_recipient:
+            self._outstanding_recipient = None
             bt.logging.debug(
                 f"Weight recipient unchanged ({plan.recipient}); skip set_weights."
+            )
+            return False
+        self._outstanding_recipient = plan.recipient
+
+        if (
+            block is not None
+            and self._last_submit_attempt_block is not None
+            and (block - self._last_submit_attempt_block) < RETRY_INTERVAL_BLOCKS
+        ):
+            return False
+
+        elapsed = self._blocks_since_last_update()
+        rate = self._weights_rate_limit()
+        if elapsed is not None and elapsed < rate:
+            bt.logging.info(
+                f"JWT sink {plan.recipient} differs from last emit "
+                f"{self._last_emitted_recipient}; waiting for weights_rate_limit "
+                f"({elapsed}/{rate} blocks)."
             )
             return False
         return True
@@ -574,6 +587,8 @@ class Validator(BaseValidatorNeuron):
         super()._mark_local_weights_submitted()
         if self._pending_recipient:
             self._last_emitted_recipient = self._pending_recipient
+            self._outstanding_recipient = None
+            self._planned_weight_targets = None
             bt.logging.info(
                 f"Recorded emitted weight recipient {self._last_emitted_recipient}"
             )
@@ -589,9 +604,9 @@ class Validator(BaseValidatorNeuron):
         """
         try:
             plan = self._planned_weight_targets
-            self._planned_weight_targets = None
             if plan is None:
                 plan = self._plan_weight_targets()
+                self._planned_weight_targets = plan
             if not plan.from_jwt:
                 bt.logging.warning(
                     "No platform sink claim; skipping set_weights (will not emit fallback)."
@@ -667,6 +682,9 @@ class Validator(BaseValidatorNeuron):
             return
 
         self._pending_recipient = weight_recipient
+        block = self._current_block()
+        if block is not None:
+            self._last_submit_attempt_block = block
         super().set_weights()
 
     def save_state(self):
