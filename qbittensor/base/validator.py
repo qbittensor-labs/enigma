@@ -29,6 +29,35 @@ from typing import List, Union
 from traceback import print_exception
 
 from qbittensor.base.neuron import BaseNeuron
+
+
+def _format_execute_failure(result) -> str:
+    """Pull the real reject reason out of an SDK execute() result.
+
+    v11 often puts a generic 'check the detail line above' on result.message
+    and the actual error on result.error, which our logger never printed.
+    """
+    parts: List[str] = []
+    err = getattr(result, "error", None)
+    if err is not None:
+        err_type = type(err).__name__
+        if err_type not in ("Mock", "MagicMock"):
+            parts.append(err_type)
+        for attr in ("name", "code", "message", "remediation", "detail"):
+            val = getattr(err, attr, None)
+            if val:
+                parts.append(f"{attr}={val}")
+        err_str = str(err).strip()
+        if err_str and err_str not in parts:
+            parts.append(err_str)
+    msg = getattr(result, "message", None)
+    if msg:
+        parts.append(str(msg))
+    if not parts:
+        parts.append(repr(result))
+    return " | ".join(parts)
+
+
 from qbittensor.base.utils.weight_utils import (
     process_weights_for_netuid,
     convert_weights_and_uids_for_emit,
@@ -287,9 +316,7 @@ class BaseValidatorNeuron(BaseNeuron):
                 # the next 5s loop would submit again.
                 self._mark_local_weights_submitted()
             else:
-                err = getattr(result, "error", None)
-                msg = getattr(err, "remediation", None) or getattr(result, "message", result)
-                bt.logging.error("set_weights failed", msg)
+                bt.logging.error(f"set_weights failed: {_format_execute_failure(result)}")
         except Exception as exc:
             bt.logging.error(f"set_weights failed: {exc}", exc_info=True)
 

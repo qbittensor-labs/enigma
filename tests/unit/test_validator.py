@@ -26,7 +26,8 @@ from neurons.validator import (
     PRIVATE_MINER_HOTKEY,
     TREASURY_HOTKEY,
     MIN_DUST_FLOOR,
-    WEIGHTS_MIN_INTERVAL_BLOCKS,
+    DEFAULT_WEIGHTS_RATE_LIMIT,
+    RETRY_INTERVAL_BLOCKS,
     Validator,
 )
 from qbittensor.utils.treasury_sinks import TREASURY_SINK_HOTKEYS
@@ -683,7 +684,7 @@ class TestSetWeights:
 
         assert mock_validator.metagraph.last_update[0] == 0
 
-    def test_set_weights_failed_result_uses_error_remediation(self, mock_validator):
+    def test_set_weights_failed_result_logs_error_fields(self, mock_validator, caplog):
         from qbittensor.base.validator import BaseValidatorNeuron
 
         mock_validator.uid = 0
@@ -691,9 +692,14 @@ class TestSetWeights:
         mock_validator.scores = np.array([1.0, 0.0, 0.0], dtype=np.float32)
         mock_validator.metagraph.last_update = [0, 0, 0]
         mock_validator.metagraph.uids = np.arange(3, dtype=np.int64)
-        err = Mock()
-        err.remediation = "wait for inclusion"
-        mock_validator.subtensor.execute.return_value = Mock(success=False, error=err)
+        err = type("ChainError", (), {})()
+        err.name = "SettingWeightsTooFast"
+        err.remediation = "wait 96 blocks"
+        mock_validator.subtensor.execute.return_value = Mock(
+            success=False,
+            error=err,
+            message="the node rejected the extrinsic before inclusion; check the detail line above",
+        )
 
         with (
             patch(
@@ -704,10 +710,14 @@ class TestSetWeights:
                 "qbittensor.base.validator.convert_weights_and_uids_for_emit",
                 return_value=([0], [1.0]),
             ),
+            caplog.at_level("ERROR"),
         ):
             BaseValidatorNeuron.set_weights(mock_validator)
 
         assert mock_validator.metagraph.last_update[0] == 0
+        joined = " ".join(r.getMessage() for r in caplog.records)
+        assert "SettingWeightsTooFast" in joined
+        assert "wait 96 blocks" in joined
 
     def test_mark_local_weights_submitted_skips_missing_last_update(self, mock_validator):
         from qbittensor.base.validator import BaseValidatorNeuron
@@ -766,26 +776,26 @@ class TestShouldSetWeights:
     def test_same_recipient_skips(self, mock_validator):
         sink = self._ready(mock_validator, last_update=0, block=720)
         mock_validator._last_emitted_recipient = sink
-        mock_validator._last_seen_tempo = 720 // 360
         assert mock_validator.should_set_weights() is False
+        assert mock_validator._outstanding_recipient is None
 
-    def test_new_sink_after_tempo_change_sets(self, mock_validator):
+    def test_new_sink_sets_when_rate_limit_elapsed(self, mock_validator):
         old = TREASURY_SINK_HOTKEYS[0]
         new = TREASURY_SINK_HOTKEYS[2]
-        self._ready(mock_validator, block=720, last_update=710, sink=new)
+        self._ready(mock_validator, block=720, last_update=0, sink=new)
         mock_validator._last_emitted_recipient = old
-        mock_validator._last_seen_tempo = 1  # previous tempo
         assert mock_validator.should_set_weights() is True
         assert mock_validator._planned_weight_targets.recipient == new
+        assert mock_validator._outstanding_recipient == new
 
-    def test_cooldown_skips_even_if_sink_changed(self, mock_validator):
+    def test_rate_limit_skips_even_if_sink_changed(self, mock_validator):
         old = TREASURY_SINK_HOTKEYS[0]
         new = TREASURY_SINK_HOTKEYS[2]
         self._ready(mock_validator, block=714, last_update=710, sink=new)
         mock_validator._last_emitted_recipient = old
-        mock_validator._last_seen_tempo = 1
-        assert (714 - 710) < WEIGHTS_MIN_INTERVAL_BLOCKS
+        assert (714 - 710) < DEFAULT_WEIGHTS_RATE_LIMIT
         assert mock_validator.should_set_weights() is False
+        assert mock_validator._outstanding_recipient == new
 
     def test_missing_jwt_does_not_set(self, mock_validator):
         self._ready(mock_validator)
@@ -803,7 +813,6 @@ class TestShouldSetWeights:
         monkeypatch.setenv("TREASURY_CAP_ENABLED", "1")
         sink = self._ready(mock_validator, block=720, last_update=0)
         mock_validator._last_emitted_recipient = sink
-        mock_validator._last_seen_tempo = 720 // 360
         mock_validator.metagraph.hotkeys = [sink, BURN_SINK_HOTKEYS[0], PRIVATE_MINER_HOTKEY]
         TestSetWeights._stub_sink_jwt(mock_validator, sink, BURN_SINK_HOTKEYS[0])
         decision = CapDecision(
@@ -814,20 +823,62 @@ class TestShouldSetWeights:
             effective_cap=200_000.0,
         )
         with patch("neurons.validator.decide_treasury_share", return_value=decision):
-            # same tempo + cap on + elapsed > epoch_length (720-0)
             assert mock_validator.should_set_weights() is True
             assert (
                 mock_validator._planned_weight_targets.recipient
                 == BURN_SINK_HOTKEYS[0]
             )
 
-    def test_same_tempo_without_cap_does_not_refresh(self, mock_validator):
+    def test_idle_does_not_refresh_jwt_every_tick(self, mock_validator):
         sink = self._ready(mock_validator, block=720, last_update=0)
         mock_validator._last_emitted_recipient = sink
-        mock_validator._last_seen_tempo = 720 // 360
         rm = mock_validator.platform_client.request_manager
         assert mock_validator.should_set_weights() is False
+        rm.refresh_jwt.assert_called_once()
+        rm.refresh_jwt.reset_mock()
+        mock_validator.subtensor.block = 721  # still inside poll interval
+        assert mock_validator.should_set_weights() is False
         rm.refresh_jwt.assert_not_called()
+
+    def test_failed_submit_retries_after_backoff(self, mock_validator):
+        old = TREASURY_SINK_HOTKEYS[0]
+        new = TREASURY_SINK_HOTKEYS[2]
+        self._ready(mock_validator, block=720, last_update=0, sink=new)
+        mock_validator._last_emitted_recipient = old
+        mock_validator._outstanding_recipient = new
+        mock_validator._last_submit_attempt_block = 720
+        assert mock_validator.should_set_weights() is False
+        mock_validator._last_submit_attempt_block = 720 - RETRY_INTERVAL_BLOCKS
+        assert mock_validator.should_set_weights() is True
+
+    def test_failed_submit_does_not_forget_outstanding_sink(self, mock_validator):
+        old = TREASURY_SINK_HOTKEYS[0]
+        new = TREASURY_SINK_HOTKEYS[2]
+        mock_validator.uid = 0
+        mock_validator.step = 1
+        mock_validator.metagraph.hotkeys = [new, PRIVATE_MINER_HOTKEY]
+        mock_validator.metagraph.last_update = [0, 0]
+        mock_validator.subtensor.block = 720
+        mock_validator.subtensor.execute.return_value = Mock(
+            success=False, error=None, message="node rejected"
+        )
+        TestSetWeights._stub_sink_jwt(mock_validator, new)
+        mock_validator._last_emitted_recipient = old
+
+        with (
+            patch(
+                "qbittensor.base.validator.process_weights_for_netuid",
+                return_value=(np.array([0]), np.array([1.0])),
+            ),
+            patch(
+                "qbittensor.base.validator.convert_weights_and_uids_for_emit",
+                return_value=([0], [1.0]),
+            ),
+        ):
+            mock_validator.set_weights()
+
+        assert mock_validator._last_emitted_recipient == old
+        assert mock_validator._last_submit_attempt_block == 720
 
 
 class TestResyncAndScores:
