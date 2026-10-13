@@ -212,17 +212,16 @@ def extract_stdout_output(container_ref: str, host_workspace: str) -> OutputExtr
 
     payload_b64 = payload_b64.strip()
 
-    # Use shared tolerant cleaner (handles combined docker logs stream)
-    from qbittensor.challenges.solution_output import clean_base64_payload
-    payload_b64 = clean_base64_payload(payload_b64)
-
-    try:
-        payload_bytes = base64.b64decode(payload_b64, validate=True)
-    except (binascii.Error, ValueError) as e:
+    # docker logs mixes stderr in after the payload. Keep a prefix that is still a zip.
+    from qbittensor.challenges.solution_output import decode_solution_payload
+    payload_bytes = decode_solution_payload(payload_b64)
+    if payload_bytes is None:
         bt.logging.error(
-            f"❌ Solution payload from '{container_ref}' is not valid base64: {e}"
+            f"❌ Solution payload from '{container_ref}' is not valid base64"
         )
-        _write_extraction_diagnostics(artifacts_dir, container_ref, f"Base64 decode of solution payload failed: {e}")
+        _write_extraction_diagnostics(
+            artifacts_dir, container_ref, "Base64 decode of solution payload failed."
+        )
         return OutputExtractionStatus.INVALID_BASE64
 
     zip_path = os.path.join(host_output, SOLUTION_OUTPUT_ZIP_FILENAME)

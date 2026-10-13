@@ -15,7 +15,9 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+import json
 import uuid
+from datetime import datetime
 
 import bittensor as bt
 from sqlalchemy import func
@@ -306,6 +308,106 @@ class DBQuery(BaseDBQuery):
                     return False
         except Exception as e:
             bt.logging.error(f"Error updating solution status by id: {e}")
+            return False
+
+    def record_platform_report(
+        self,
+        solution_id: str,
+        *,
+        reported: bool,
+        pending_json: str | None,
+        retry_until: datetime | None,
+        next_retry_at: datetime | None,
+    ) -> bool:
+        """Store whether the terminal verify update reached the platform."""
+        try:
+            with self._managed_session() as session:
+                solution = session.query(ChallengeSolution).filter_by(id=solution_id).first()
+                if not solution:
+                    bt.logging.warning(f"No challenge solution found with id: {solution_id}")
+                    return False
+                solution.platform_reported = reported
+                if reported:
+                    solution.pending_verify_report = None
+                    solution.report_retry_until = None
+                    solution.report_next_retry_at = None
+                else:
+                    solution.pending_verify_report = pending_json
+                    solution.report_retry_until = retry_until
+                    solution.report_next_retry_at = next_retry_at
+                return True
+        except Exception as e:
+            bt.logging.error(f"Error recording platform report for {solution_id}: {e}")
+            return False
+
+    def list_unreported_verifications(self) -> list[dict]:
+        """Terminal results whose verify update has not landed and may still be retried."""
+        try:
+            with self._managed_session(read_only=True) as session:
+                rows = (
+                    session.query(ChallengeSolution)
+                    .filter(
+                        ChallengeSolution.platform_reported.is_(False),
+                        ChallengeSolution.report_retry_until.isnot(None),
+                    )
+                    .all()
+                )
+                pending_rows = []
+                for row in rows:
+                    pending = None
+                    if row.pending_verify_report:
+                        try:
+                            pending = json.loads(row.pending_verify_report)
+                        except ValueError:
+                            pending = None
+                    pending_rows.append(
+                        {
+                            "id": row.id,
+                            "submission_id": row.submission_id,
+                            "report_retry_until": row.report_retry_until,
+                            "report_next_retry_at": row.report_next_retry_at,
+                            "pending": pending,
+                        }
+                    )
+                return pending_rows
+        except Exception as e:
+            bt.logging.error(f"Error listing unreported verifications: {e}")
+            return []
+
+    def mark_verification_reported(self, solution_id: str) -> bool:
+        return self.record_platform_report(
+            solution_id,
+            reported=True,
+            pending_json=None,
+            retry_until=None,
+            next_retry_at=None,
+        )
+
+    def defer_verification_retry(self, solution_id: str, next_retry_at: datetime) -> bool:
+        try:
+            with self._managed_session() as session:
+                solution = session.query(ChallengeSolution).filter_by(id=solution_id).first()
+                if not solution:
+                    return False
+                solution.report_next_retry_at = next_retry_at
+                return True
+        except Exception as e:
+            bt.logging.error(f"Error deferring verify retry for {solution_id}: {e}")
+            return False
+
+    def expire_verification_retry(self, solution_id: str) -> bool:
+        """Stop retrying. platform_reported stays false."""
+        try:
+            with self._managed_session() as session:
+                solution = session.query(ChallengeSolution).filter_by(id=solution_id).first()
+                if not solution:
+                    return False
+                solution.report_retry_until = None
+                solution.report_next_retry_at = None
+                solution.pending_verify_report = None
+                return True
+        except Exception as e:
+            bt.logging.error(f"Error expiring verify retry for {solution_id}: {e}")
             return False
 
     def prune_old_solutions(self):

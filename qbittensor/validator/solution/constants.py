@@ -48,6 +48,7 @@ CONTAINER_CHALLENGE_INPUT_PATH: str = "/challenge_input"
 from qbittensor.challenges.solution_output import (
     RESULT_JSON_FILENAME,          # noqa: F401
     SOLUTION_LOG_FILENAME,         # noqa: F401
+    SOLUTION_OUTPUT_END_SEPARATOR,  # noqa: F401
     SOLUTION_OUTPUT_SEPARATOR,     # noqa: F401
     SOLUTION_OUTPUT_ZIP_FILENAME,  # noqa: F401
     SOLVE_INFO_JSON_FILENAME,      # noqa: F401

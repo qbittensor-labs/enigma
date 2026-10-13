@@ -17,7 +17,7 @@
 
 import logging
 import uuid
-from sqlalchemy import Column, String, DateTime, func, Boolean, Integer
+from sqlalchemy import Column, String, DateTime, func, Boolean, Integer, Text
 from ..base import Base
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,12 @@ class ChallengeSolution(Base):
     validation_id = Column(String(50), nullable=True, unique=True)
     miner_hotkey = Column(String(100), nullable=False)
     cleaned = Column(Boolean, default=False, nullable=False)
+    # Null while the run is still in progress. False means the terminal
+    # verify update has not been accepted yet. True means the platform took it.
+    platform_reported = Column(Boolean, nullable=True)
+    report_retry_until = Column(DateTime, nullable=True)
+    report_next_retry_at = Column(DateTime, nullable=True)
+    pending_verify_report = Column(Text, nullable=True)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 

@@ -23,6 +23,8 @@ Miner containers communicate their results via stdout using this protocol:
   1. Text logs (human-readable, any format)
   2. A magic separator line (SOLUTION_OUTPUT_SEPARATOR)
   3. Base64-encoded zip containing the files named by RESULT_JSON_FILENAME etc. (see constants below)
+  4. An optional end line (SOLUTION_OUTPUT_END_SEPARATOR). Anything after it is ignored.
+     Miners that omit it are read the same way as before.
 
 Docker's json-file logging driver treats stdout as UTF-8 text and corrupts
 raw binary, so the zip MUST be base64-encoded. The validator captures stdout
@@ -39,6 +41,7 @@ import base64
 import binascii
 import io
 import os
+import re
 import sys
 import zipfile
 
@@ -46,6 +49,14 @@ import zipfile
 SOLUTION_OUTPUT_SEPARATOR: bytes = (
     b"\n----- ENIGMA-SOLUTION-OUTPUT-BEGIN-a8c7f3e2-9d4b-4c5a-8f1e-2b6d3a4e5f7c -----\n"
 )
+
+# Optional terminator. When present, only the bytes between the begin and end
+# lines are the payload. When absent, the reader uses the same base64 cleanup
+# it used before this marker existed.
+SOLUTION_OUTPUT_END_LINE: bytes = (
+    b"----- ENIGMA-SOLUTION-OUTPUT-END-a8c7f3e2-9d4b-4c5a-8f1e-2b6d3a4e5f7c -----"
+)
+SOLUTION_OUTPUT_END_SEPARATOR: bytes = b"\n" + SOLUTION_OUTPUT_END_LINE + b"\n"
 
 SOLUTION_LOG_FILENAME: str = "container.log"
 
@@ -107,8 +118,8 @@ def build_solution_result_zip(
 def write_solution_output(zip_bytes: bytes) -> None:
     """Flush all output streams, then emit separator + base64-encoded zip to stdout.
 
-    This MUST be the last thing written to stdout. Any subsequent output will
-    corrupt the payload and cause extraction failures on the validator.
+    The end marker is written immediately after the base64 so shutdown warnings
+    on stderr, which ``docker logs`` appends, stay outside the payload.
     """
     sys.stdout.flush()
     sys.stderr.flush()
@@ -117,7 +128,7 @@ def write_solution_output(zip_bytes: bytes) -> None:
     buf = sys.stdout.buffer
     buf.write(SOLUTION_OUTPUT_SEPARATOR)
     buf.write(encoded)
-    buf.write(b"\n")
+    buf.write(SOLUTION_OUTPUT_END_SEPARATOR)
     buf.flush()
 
 
@@ -125,28 +136,90 @@ def write_solution_output(zip_bytes: bytes) -> None:
 # Reader-side helpers (validator / workbench)
 # ---------------------------------------------------------------------------
 
+# How much trailing alphabet (stderr that happens to look like base64) we will
+# drop while searching for a prefix that is still a zip. A Python warning path
+# such as "/usr/local/..." contributes only a few dozen characters.
+_BASE64_TAIL_SLACK = 512
+_BASE64_LINE = re.compile(rb"[A-Za-z0-9+/=]+")
+
+
 def clean_base64_payload(payload_b64: bytes | str) -> bytes | str:
-    """Take only the leading valid base64 characters from the payload section.
-    This tolerates trailing junk (e.g. stderr text) when using combined docker logs.
+    """Keep the base64 payload and drop text docker logs appended after it.
+
+    ``docker logs`` has no stdout-only mode, so a shutdown warning on stderr
+    can follow the payload. Whole base64 lines are kept. A later line that is
+    not base64 ends the payload. If that line still starts with base64
+    characters and nothing has been kept yet, only that leading run is kept.
     """
-    if isinstance(payload_b64, (bytes, bytearray)):
-        payload_b64 = payload_b64.strip()
-        import re
-        m = re.match(rb"^[A-Za-z0-9+/=\s]*", payload_b64)
-        if m:
-            candidate = m.group(0).strip()
-            if candidate:
-                return candidate
-        return payload_b64
+    as_text = isinstance(payload_b64, str)
+    raw = payload_b64.encode("ascii", errors="ignore") if as_text else bytes(payload_b64)
+    parts: list[bytes] = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        match = _BASE64_LINE.fullmatch(stripped)
+        if match:
+            parts.append(stripped)
+            continue
+        if not parts:
+            prefix = _BASE64_LINE.match(stripped)
+            if prefix:
+                parts.append(prefix.group(0))
+        break
+    cleaned = b"".join(parts) if parts else raw.strip()
+    if as_text:
+        return cleaned.decode("ascii", errors="ignore")
+    return cleaned
+
+
+def decode_solution_payload(payload_b64: bytes | str) -> bytes | None:
+    """Decode a solution payload, ignoring stderr glued on by ``docker logs``.
+
+    When the end marker is present, only the bytes before it are decoded.
+    When it is missing, the payload is cleaned the same way as before.
+
+    Returns the longest decoded prefix that opens as a zip. When nothing is a
+    zip, returns the longest valid base64 prefix so the caller can report an
+    invalid zip. Returns None when no prefix decodes.
+    """
+    if isinstance(payload_b64, str):
+        raw = payload_b64.encode("ascii", errors="ignore")
     else:
-        payload_b64 = payload_b64.strip()
-        import re
-        m = re.match(r"^[A-Za-z0-9+/=\s]*", payload_b64)
-        if m:
-            candidate = m.group(0).strip()
-            if candidate:
-                return candidate
-        return payload_b64
+        raw = bytes(payload_b64)
+    end_at = raw.find(SOLUTION_OUTPUT_END_LINE)
+    if end_at != -1:
+        payload_b64 = raw[:end_at]
+    cleaned = clean_base64_payload(payload_b64)
+    if isinstance(cleaned, str):
+        cleaned = cleaned.encode("ascii", errors="ignore")
+    cleaned = re.sub(rb"\s+", b"", cleaned)
+    if len(cleaned) < 4:
+        return None
+
+    aligned = len(cleaned) - (len(cleaned) % 4)
+    floor = max(4, aligned - _BASE64_TAIL_SLACK)
+    first_decoded: bytes | None = None
+    for size in range(aligned, floor - 1, -4):
+        try:
+            decoded = base64.b64decode(cleaned[:size], validate=True)
+        except (binascii.Error, ValueError):
+            continue
+        if first_decoded is None:
+            first_decoded = decoded
+        if _opens_as_zip(decoded):
+            return decoded
+    return first_decoded
+
+
+def _opens_as_zip(data: bytes) -> bool:
+    if not data.startswith(b"PK"):
+        return False
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            return archive.testzip() is None and bool(archive.namelist())
+    except zipfile.BadZipFile:
+        return False
 
 
 def split_on_separator(raw_stdout: bytes) -> tuple[bytes, bytes, bool]:
@@ -199,12 +272,9 @@ def extract_artifacts(
     if not payload_b64:
         return False, "Separator found but base64 payload is empty."
 
-    payload_b64 = clean_base64_payload(payload_b64)
-
-    try:
-        payload_bytes = base64.b64decode(payload_b64, validate=True)
-    except (binascii.Error, ValueError) as e:
-        return False, f"Base64 decode of solution payload failed: {e}"
+    payload_bytes = decode_solution_payload(payload_b64)
+    if payload_bytes is None:
+        return False, "Base64 decode of solution payload failed."
 
     if not payload_bytes:
         return False, "Decoded payload is empty."

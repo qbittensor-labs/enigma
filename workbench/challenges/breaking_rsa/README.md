@@ -101,6 +101,18 @@ A working reference implementation is provided in `example_solution/`. It uses
 a multi-stage pipeline (trial division, Pollard's rho, algebraic attacks, ECM,
 msieve SIQS) and includes a `Dockerfile` and `breaking_rsa.py` solver script.
 
+**This example is the original baseline — deliberately trivial, and nowhere near
+the frontier.** It is dwarfed by the solvers that have actually won recent
+milestones, factoring 500-bit semiprimes on a single workstation in a few hours.
+Every winning submission is open-sourced under AGPL-3.0 and archived, milestone
+by milestone, here:
+
+**→ [github.com/qbittensor-labs/breaking-rsa-solutions](https://github.com/qbittensor-labs/breaking-rsa-solutions)**
+
+If you're serious about competing, start from the current frontier in that repo
+rather than from this example — Enigma open-sources each winning solution so the
+next competitor can build on it.
+
 ## Testing
 
 ```bash
