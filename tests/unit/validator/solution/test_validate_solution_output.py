@@ -28,7 +28,9 @@ from qbittensor.utils.solution_status import (
     failure_reason_for_extraction,
 )
 from qbittensor.challenges.solution_output import SOLUTION_LOG_FILENAME
+from qbittensor.constants import VERIFY_REPORT_RETRY_DELAYS_S
 from qbittensor.validator.solution.validate_solution_output import (
+    VerifyReportState,
     establish_upload_locations_for_solution_data,
     perform_solution_output_validation,
     upload_zip_to_platform,
@@ -116,6 +118,108 @@ class TestValidateSolutionCorePaths:
             challenge_id="c-x",
         )
         assert status == ValidationFailureReason.UPLOAD_FAILURE.value
+        platform_client.report_submission_status.assert_called_once_with(
+            "sub-x",
+            "Failure",
+            log_data_key=None,
+            output_data_key=None,
+            validation_id=None,
+            reason=ValidationFailureReason.UPLOAD_FAILURE.default_message,
+            failure_reason=ValidationFailureReason.UPLOAD_FAILURE.value,
+        )
+
+    def test_upload_location_failure_keeps_upload_failure_when_report_misses(self, tmp_path, platform_client):
+        ws = str(tmp_path / "ws")
+        os.makedirs(os.path.join(ws, "output"))
+        platform_client.create_verification_upload_url.return_value = None
+        platform_client.report_submission_status.return_value = False
+        delivery = VerifyReportState()
+
+        with patch("qbittensor.validator.solution.validate_solution_output._retry_sleep"):
+            status = validate_solution(
+                ws,
+                platform_client,
+                submission_id="sub-x",
+                challenge_milestone_id="m-x",
+                challenge_id="c-x",
+                validation_id="val-x",
+                delivery=delivery,
+            )
+
+        assert status == ValidationFailureReason.UPLOAD_FAILURE.value
+        assert delivery.platform_reported is False
+        assert delivery.pending["failure_reason"] == ValidationFailureReason.UPLOAD_FAILURE.value
+        assert platform_client.report_submission_status.call_count == (
+            1 + len(VERIFY_REPORT_RETRY_DELAYS_S)
+        )
+
+    def test_rejected_failure_reason_stays_the_real_result(self, tmp_path, platform_client):
+        ws = str(tmp_path / "ws")
+        os.makedirs(os.path.join(ws, "output", "solution_artifacts"))
+        platform_client.create_verification_upload_url.side_effect = [
+            Mock(id="log_id", url="log_url"),
+            Mock(id="out-id", url="out_url"),
+        ]
+        platform_client.report_submission_status.return_value = False
+        delivery = VerifyReportState()
+
+        with patch("qbittensor.validator.solution.validate_solution_output._retry_sleep"), \
+                patch("qbittensor.validator.solution.validate_solution_output.upload_logs_package", return_value=True), \
+                patch("qbittensor.validator.solution.validate_solution_output.upload_zip_to_platform", return_value=True):
+            status = validate_solution(
+                ws,
+                platform_client,
+                submission_id="sub1",
+                challenge_milestone_id="m1",
+                challenge_id="c1",
+                validation_id="val-1",
+                exit_code=1,
+                extraction=OutputExtractionStatus.INVALID_BASE64,
+                delivery=delivery,
+            )
+
+        assert status == ValidationFailureReason.INVALID_OUTPUT_BASE64.value
+        assert delivery.platform_reported is False
+        assert delivery.pending["failure_reason"] == ValidationFailureReason.INVALID_OUTPUT_BASE64.value
+        assert delivery.pending["status"] == "Failure"
+        assert platform_client.report_submission_status.call_count == (
+            1 + len(VERIFY_REPORT_RETRY_DELAYS_S)
+        )
+
+    def test_success_report_failure_keeps_success(self, tmp_path, platform_client):
+        ws = str(tmp_path / "ws")
+        os.makedirs(os.path.join(ws, "output"))
+        platform_client.create_verification_upload_url.side_effect = [
+            Mock(id="log_id", url="log_url"),
+            Mock(id="out-id", url="out_url"),
+        ]
+        platform_client.report_submission_status.return_value = False
+        delivery = VerifyReportState()
+
+        with patch("qbittensor.validator.solution.validate_solution_output._retry_sleep"), \
+                patch("qbittensor.validator.solution.validate_solution_output.upload_logs_package", return_value=True), \
+                patch("qbittensor.validator.solution.validate_solution_output.upload_zip_to_platform", return_value=True), \
+                patch("qbittensor.validator.solution.validate_solution_output.validate_output", return_value=(True, None)):
+            status = validate_solution(
+                ws,
+                platform_client,
+                submission_id="sub1",
+                challenge_milestone_id="m1",
+                challenge_id="c1",
+                delivery=delivery,
+            )
+
+        assert status == SolutionStatus.SUCCESS.value
+        assert delivery.platform_reported is False
+        assert delivery.pending["status"] == "Success"
+        assert delivery.pending["failure_reason"] is None
+        platform_client.report_submission_status.assert_called_with(
+            "sub1",
+            "Success",
+            log_data_key="log_id",
+            output_data_key="out-id",
+            validation_id=None,
+        )
 
     def test_perform_validation_success_reports_success_with_keys(self, tmp_path, platform_client):
         ws = str(tmp_path / "ws")

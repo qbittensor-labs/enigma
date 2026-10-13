@@ -32,6 +32,7 @@ from qbittensor.validator.solution.constants import (
     CONTAINER_CHALLENGE_INPUT_PATH,
     CONTAINER_OUTPUT_DIRNAME,
     CONTAINER_SOLUTION_DIRNAME,
+    SOLUTION_OUTPUT_END_SEPARATOR,
     SOLUTION_OUTPUT_SEPARATOR,
     SOLUTION_OUTPUT_ZIP_FILENAME,
     VALIDATOR_DOCKER_CPU_LIMIT_DEFAULT,
@@ -212,6 +213,63 @@ class TestExtractStdoutOutput:
         log_path = workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_LOG_FILENAME
         assert log_path.read_bytes() == stdout
         assert not (workspace / CONTAINER_OUTPUT_DIRNAME / SOLUTION_OUTPUT_ZIP_FILENAME).exists()
+
+    def test_stderr_warning_after_payload_still_extracts(self, tmp_path):
+        """docker logs appends stderr after the base64 line. That must not fail the zip."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        zip_bytes = _make_zip({RESULT_JSON_FILENAME: '{"ok": true}'})
+        warning = (
+            b"/usr/local/lib/python3.12/multiprocessing/resource_tracker.py:279: "
+            b"UserWarning: resource_tracker: There appear to be 2 leaked semaphore objects "
+            b"to clean up at shutdown\n"
+            b"  warnings.warn('resource_tracker: There appear to be %d '\n"
+        )
+        stdout = _build_stdout_with_payload(b"log\n", zip_bytes) + warning
+        with patch("qbittensor.validator.solution.run_solution.DockerOps") as mock_docker_cls:
+            mock_ops = MagicMock()
+            mock_ops.logs.return_value = stdout.decode("utf-8")
+            mock_docker_cls.return_value = mock_ops
+            assert extract_stdout_output("ctr", str(workspace)) is OutputExtractionStatus.ARTIFACTS_EXTRACTED
+
+        extracted = (
+            workspace / CONTAINER_OUTPUT_DIRNAME / CONTAINER_SOLUTION_DIRNAME / RESULT_JSON_FILENAME
+        )
+        assert extracted.read_text() == '{"ok": true}'
+
+    def test_stderr_on_the_same_line_still_extracts(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        zip_bytes = _make_zip({RESULT_JSON_FILENAME: '{"ok": true}'})
+        stdout = _build_stdout_with_payload(b"log\n", zip_bytes).rstrip(b"\n")
+        stdout += b"/usr/local/lib/python3.12/multiprocessing/resource_tracker.py:279: UserWarning\n"
+        with patch("qbittensor.validator.solution.run_solution.DockerOps") as mock_docker_cls:
+            mock_ops = MagicMock()
+            mock_ops.logs.return_value = stdout.decode("utf-8")
+            mock_docker_cls.return_value = mock_ops
+            assert extract_stdout_output("ctr", str(workspace)) is OutputExtractionStatus.ARTIFACTS_EXTRACTED
+
+    def test_end_marker_excludes_anything_after_it(self, tmp_path):
+        """Text after the end marker is not part of the payload, even if it looks like base64."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        zip_bytes = _make_zip({RESULT_JSON_FILENAME: '{"ok": true}'})
+        stdout = _build_stdout_with_payload(b"log\n", zip_bytes).rstrip(b"\n")
+        stdout += SOLUTION_OUTPUT_END_SEPARATOR
+        stdout += b"AAAA" * 32
+        stdout += (
+            b"\n/usr/local/lib/python3.12/multiprocessing/resource_tracker.py:279: UserWarning\n"
+        )
+        with patch("qbittensor.validator.solution.run_solution.DockerOps") as mock_docker_cls:
+            mock_ops = MagicMock()
+            mock_ops.logs.return_value = stdout.decode("utf-8")
+            mock_docker_cls.return_value = mock_ops
+            assert extract_stdout_output("ctr", str(workspace)) is OutputExtractionStatus.ARTIFACTS_EXTRACTED
+
+        extracted = (
+            workspace / CONTAINER_OUTPUT_DIRNAME / CONTAINER_SOLUTION_DIRNAME / RESULT_JSON_FILENAME
+        )
+        assert extracted.read_text() == '{"ok": true}'
 
     def test_truncates_when_stdout_exceeds_cap(self, tmp_path, monkeypatch):
         workspace = tmp_path / "workspace"

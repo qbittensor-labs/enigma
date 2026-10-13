@@ -17,7 +17,7 @@
 
 import json
 import subprocess
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -47,6 +47,7 @@ def container_manager():
             telemetry_service=None,
         )
     mgr.database_connection.db_query = Mock()
+    mgr.database_connection.db_query.list_unreported_verifications.return_value = []
     return mgr
 
 
@@ -369,6 +370,112 @@ class TestValidateAndReportSolutions:
             assert mock_validate.call_count == 2
             assert mock_update.call_count == 2
             mock_clean.assert_called_once_with(infos)
+
+
+class TestRetryUnreportedVerifications:
+    def test_due_report_is_resent_and_marked(self, container_manager):
+        now = datetime.now(timezone.utc)
+        container_manager.database_connection.db_query.list_unreported_verifications.return_value = [
+            {
+                "id": "sol-1",
+                "submission_id": "sub-1",
+                "report_retry_until": now + timedelta(minutes=10),
+                "report_next_retry_at": now - timedelta(seconds=5),
+                "pending": {
+                    "status": "Failure",
+                    "failure_reason": "InvalidOutputBase64",
+                    "validation_id": "val-1",
+                },
+            }
+        ]
+        container_manager.platform_client.report_submission_status.return_value = True
+
+        container_manager._retry_unreported_verifications()
+
+        container_manager.platform_client.report_submission_status.assert_called_once()
+        kwargs = container_manager.platform_client.report_submission_status.call_args.kwargs
+        assert kwargs["failure_reason"] == "InvalidOutputBase64"
+        container_manager.database_connection.db_query.mark_verification_reported.assert_called_once_with(
+            "sol-1"
+        )
+
+    def test_waiting_report_is_not_sent(self, container_manager):
+        now = datetime.now(timezone.utc)
+        container_manager.database_connection.db_query.list_unreported_verifications.return_value = [
+            {
+                "id": "sol-1",
+                "submission_id": "sub-1",
+                "report_retry_until": now + timedelta(minutes=10),
+                "report_next_retry_at": now + timedelta(seconds=30),
+                "pending": {"status": "Failure", "failure_reason": "UploadFailure"},
+            }
+        ]
+
+        container_manager._retry_unreported_verifications()
+
+        container_manager.platform_client.report_submission_status.assert_not_called()
+
+    def test_expired_report_is_dropped(self, container_manager):
+        now = datetime.now(timezone.utc)
+        container_manager.database_connection.db_query.list_unreported_verifications.return_value = [
+            {
+                "id": "sol-1",
+                "submission_id": "sub-1",
+                "report_retry_until": now - timedelta(seconds=1),
+                "report_next_retry_at": now - timedelta(minutes=1),
+                "pending": {"status": "Success"},
+            }
+        ]
+
+        container_manager._retry_unreported_verifications()
+
+        container_manager.platform_client.report_submission_status.assert_not_called()
+        container_manager.database_connection.db_query.expire_verification_retry.assert_called_once_with(
+            "sol-1"
+        )
+
+    def test_startup_retries_even_when_next_attempt_is_later(self, container_manager):
+        now = datetime.now(timezone.utc)
+        container_manager.database_connection.db_query.list_unreported_verifications.return_value = [
+            {
+                "id": "sol-1",
+                "submission_id": "sub-1",
+                "report_retry_until": now + timedelta(minutes=10),
+                "report_next_retry_at": now + timedelta(minutes=5),
+                "pending": {
+                    "status": "Failure",
+                    "failure_reason": "UploadFailure",
+                    "validation_id": "val-9",
+                },
+            }
+        ]
+        container_manager.platform_client.report_submission_status.return_value = True
+
+        container_manager._retry_unreported_verifications(startup=True)
+
+        container_manager.platform_client.report_submission_status.assert_called_once()
+        container_manager.database_connection.db_query.mark_verification_reported.assert_called_once_with(
+            "sol-1"
+        )
+
+    def test_retry_request_error_does_not_escape(self, container_manager):
+        now = datetime.now(timezone.utc)
+        container_manager.database_connection.db_query.list_unreported_verifications.return_value = [
+            {
+                "id": "sol-1",
+                "submission_id": "sub-1",
+                "report_retry_until": now + timedelta(minutes=10),
+                "report_next_retry_at": now - timedelta(seconds=1),
+                "pending": {"status": "Failure", "failure_reason": "RunFailure"},
+            }
+        ]
+        container_manager.platform_client.report_submission_status.side_effect = RuntimeError(
+            "platform down"
+        )
+
+        container_manager._retry_unreported_verifications()
+
+        container_manager.database_connection.db_query.defer_verification_retry.assert_called_once()
 
 
 class TestCleanUpSolutions:

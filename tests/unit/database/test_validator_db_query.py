@@ -15,6 +15,9 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+import json
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
@@ -90,6 +93,46 @@ class TestDBQuery:
         assert ok2 is True
         row = validator_query.get_challenge_solution_by_id(original_id)
         assert row.solution_status == SolutionStatus.FAILURE.value
+
+    def test_unreported_verification_is_retried_then_cleared(self, validator_query):
+        data = _insert_solution(validator_query, validation_id="csv-report")
+        now = datetime.now(timezone.utc)
+        pending = json.dumps({"status": "Failure", "failure_reason": "InvalidOutputBase64"})
+        assert validator_query.record_platform_report(
+            data["id"],
+            reported=False,
+            pending_json=pending,
+            retry_until=now + timedelta(minutes=15),
+            next_retry_at=now - timedelta(seconds=1),
+        )
+        listed = validator_query.list_unreported_verifications()
+        assert len(listed) == 1
+        assert listed[0]["submission_id"] == data["submission_id"]
+        assert listed[0]["pending"]["failure_reason"] == "InvalidOutputBase64"
+
+        assert validator_query.defer_verification_retry(data["id"], now + timedelta(seconds=60))
+        deferred = validator_query.list_unreported_verifications()
+        assert deferred[0]["report_next_retry_at"] is not None
+
+        assert validator_query.mark_verification_reported(data["id"])
+        assert validator_query.list_unreported_verifications() == []
+        row = validator_query.get_challenge_solution_by_id(data["id"])
+        assert row.platform_reported is True
+        assert row.pending_verify_report is None
+        assert row.solution_status == SolutionStatus.RUNNING.value
+
+        assert validator_query.record_platform_report(
+            data["id"],
+            reported=False,
+            pending_json=pending,
+            retry_until=now + timedelta(minutes=15),
+            next_retry_at=now,
+        )
+        assert validator_query.expire_verification_retry(data["id"])
+        expired = validator_query.get_challenge_solution_by_id(data["id"])
+        assert expired.platform_reported is False
+        assert expired.report_retry_until is None
+        assert validator_query.list_unreported_verifications() == []
 
     def test_insert_early_and_update_challenge_solution(self, validator_query):
         created_id = validator_query.create_challenge_solution(

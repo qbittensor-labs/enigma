@@ -26,12 +26,18 @@ import subprocess
 from qbittensor.utils.timer import Timer
 from qbittensor.database.db_connection import DBConnection
 from qbittensor.validator.solution.run_solution import extract_stdout_output
-from qbittensor.validator.solution.validate_solution_output import validate_solution
+from qbittensor.validator.solution.validate_solution_output import (
+    VerifyReportState,
+    resend_verify_report,
+    validate_solution,
+)
 from qbittensor.utils.services.challenges import ChallengesClient
 from qbittensor.utils.services.telemetry import TelemetryService
 from qbittensor.constants import (
     SOLUTION_CONTAINER_MANAGER_TIMEOUT,
     MAX_SOLUTIONS,
+    VERIFY_REPORT_RETRY_INTERVAL,
+    VERIFY_REPORT_RETRY_WINDOW,
     DOCKER_RESOURCE_PRUNE_INTERVAL,
     DOCKER_BUILDER_PRUNE_UNTIL,
     DOCKER_IMAGE_PRUNE_UNTIL,
@@ -46,6 +52,25 @@ import bittensor as bt
 from .docker_ops import DockerOps
 from .solution_capacity import SolutionCapacity
 from .solution_context import SolutionExecution, SolutionPostProcessInfo
+
+
+def _describe_unreported(row: dict) -> str:
+    pending = row.get("pending") if isinstance(row, dict) and isinstance(row.get("pending"), dict) else {}
+    return (
+        f"submission={row.get('submission_id') if isinstance(row, dict) else None} "
+        f"solution={row.get('id') if isinstance(row, dict) else None} "
+        f"validation={pending.get('validation_id')} "
+        f"status={pending.get('status')} "
+        f"failure_reason={pending.get('failure_reason')}"
+    )
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _docker_buildkit_available() -> bool:
@@ -204,6 +229,7 @@ class SolutionContainerManager:
         bt.logging.info("🐳 Starting periodic solution container check (pruning, completed, overdue)")
 
         self.handle_completed_solutions()
+        self._retry_unreported_verifications()
 
         number_of_running_solutions: int = self._get_number_of_running_solutions()
         bt.logging.info(f"🏗️ Found {number_of_running_solutions} containers still running")
@@ -312,6 +338,7 @@ class SolutionContainerManager:
         """
         for info in solutions:
             bt.logging.info(f"🔍 Validating solution output at {info.workspace_path}")
+            delivery = VerifyReportState()
             solution_status = validate_solution(
                 info.workspace_path,
                 self.platform_client,
@@ -321,10 +348,12 @@ class SolutionContainerManager:
                 validation_id=info.validation_id or None,
                 exit_code=info.exit_code,
                 extraction=info.extraction,
+                delivery=delivery,
             )
             self.database_connection.db_query.update_solution_status_by_id(
                 info.id, solution_status
             )
+            self._record_verify_delivery(info.id, delivery)
 
             if self.telemetry_service:
                 outcome = "success" if solution_status == SolutionStatus.SUCCESS.value else "failure"
@@ -341,6 +370,131 @@ class SolutionContainerManager:
                 )
 
         self._clean_up_solutions(solutions)
+
+    def _record_verify_delivery(self, solution_id: str, delivery: VerifyReportState) -> None:
+        if delivery.platform_reported is None or not self.database_connection:
+            return
+        now = datetime.now(timezone.utc)
+        pending_json = None
+        retry_until = None
+        next_retry_at = None
+        if not delivery.platform_reported:
+            pending_json = json.dumps(delivery.pending or {})
+            retry_until = now + VERIFY_REPORT_RETRY_WINDOW
+            next_retry_at = now + VERIFY_REPORT_RETRY_INTERVAL
+        saved = self.database_connection.db_query.record_platform_report(
+            solution_id,
+            reported=delivery.platform_reported,
+            pending_json=pending_json,
+            retry_until=retry_until,
+            next_retry_at=next_retry_at,
+        )
+        if not saved:
+            bt.logging.warning(
+                f"⚠️ Could not store platform report state for solution {solution_id}"
+            )
+
+    def _retry_unreported_verifications(self, *, startup: bool = False) -> None:
+        """Resend verify updates that missed, about once a minute, until the window ends.
+
+        Exceptions are logged and swallowed. One bad row or a platform error
+        must not escape into the validator run loop.
+        """
+        try:
+            self._retry_unreported_verifications_inner(startup=startup)
+        except Exception as e:
+            bt.logging.error(f"❌ Verify-report retry failed: {type(e).__name__}: {e}")
+
+    def _retry_unreported_verifications_inner(self, *, startup: bool = False) -> None:
+        if not self.platform_client or not self.database_connection:
+            if startup:
+                bt.logging.warning(
+                    "⚠️ Startup: cannot retry unreported verify updates "
+                    "(platform client or database is missing)"
+                )
+            return
+        try:
+            rows = self.database_connection.db_query.list_unreported_verifications()
+        except Exception as e:
+            bt.logging.error(f"❌ Could not list unreported verifications: {type(e).__name__}: {e}")
+            return
+        if not isinstance(rows, list):
+            if startup:
+                bt.logging.error(
+                    "❌ Startup: unreported verify lookup did not return a list; skipping retry"
+                )
+            return
+
+        if startup:
+            if not rows:
+                bt.logging.info("✅ Startup: no unreported verify updates found")
+                return
+            bt.logging.info(f"🔄 Startup: found {len(rows)} unreported verify update(s)")
+            for row in rows:
+                bt.logging.info(f"  found {_describe_unreported(row)}")
+
+        now = datetime.now(timezone.utc)
+        for row in rows:
+            try:
+                self._retry_one_unreported(row, now, startup=startup)
+            except Exception as e:
+                bt.logging.error(
+                    f"❌ Verify retry failed for {_describe_unreported(row)}: "
+                    f"{type(e).__name__}: {e}"
+                )
+
+    def _retry_one_unreported(self, row: dict, now: datetime, *, startup: bool) -> None:
+        solution_id = row.get("id") if isinstance(row, dict) else None
+        if not solution_id:
+            return
+        described = _describe_unreported(row)
+        until = _as_utc(row.get("report_retry_until"))
+        nxt = _as_utc(row.get("report_next_retry_at"))
+        if until is None or now >= until:
+            self.database_connection.db_query.expire_verification_retry(solution_id)
+            if startup:
+                bt.logging.warning(
+                    f"⚠️ Startup: not retrying {described}; the 15 minute window has ended"
+                )
+            else:
+                bt.logging.warning(f"⚠️ Gave up retrying verify report for {described}")
+            return
+        if not startup and nxt is not None and now < nxt:
+            return
+        pending = row.get("pending")
+        if not isinstance(pending, dict) or not pending.get("status"):
+            self.database_connection.db_query.expire_verification_retry(solution_id)
+            bt.logging.warning(
+                f"⚠️ Dropping unreported verify retry for {described}: saved report is missing"
+            )
+            return
+        if startup:
+            bt.logging.info(f"🔄 Startup: retrying verify report for {described}")
+        try:
+            sent = resend_verify_report(self.platform_client, row.get("submission_id"), pending)
+        except Exception as e:
+            sent = False
+            bt.logging.error(
+                f"❌ Verify retry request failed for {described}: {type(e).__name__}: {e}"
+            )
+        if sent:
+            self.database_connection.db_query.mark_verification_reported(solution_id)
+            bt.logging.info(
+                f"✅ Recorded deferred verify report for {described}"
+            )
+            return
+        if startup:
+            bt.logging.error(f"❌ Startup: verify retry was not accepted for {described}")
+        next_at = now + VERIFY_REPORT_RETRY_INTERVAL
+        if next_at >= until:
+            self.database_connection.db_query.expire_verification_retry(solution_id)
+            bt.logging.warning(f"⚠️ Gave up retrying verify report for {described}")
+        else:
+            self.database_connection.db_query.defer_verification_retry(solution_id, next_at)
+            bt.logging.warning(
+                f"⚠️ Verify report for {described} still unsent; "
+                f"next retry at {next_at.isoformat()}"
+            )
 
     def _clean_up_solutions(self, solutions: List[SolutionPostProcessInfo]) -> None:
         cleaned = 0
@@ -1475,3 +1629,5 @@ class SolutionContainerManager:
             bt.logging.info(f"✅ Startup recovery complete: processed {len(uncleaned)} uncleaned, marked {recovered} cleaned")
         except Exception as e:
             bt.logging.error(f"❌ Error during startup recovery of solutions: {e}")
+        finally:
+            self._retry_unreported_verifications(startup=True)

@@ -154,14 +154,14 @@ These are reported by the validator (as part of the current solution state) so t
 
 ### Failure Reasons
 
-Validators report specific failure reasons. These are the **actual strings** you will see in the `status` field:
+Validators report specific failure reasons. These are the **actual strings** you will see in the `status` field. If the platform does not accept the verify update, you still see this result. The validator retries that same update for about 15 minutes.
 
 A generic `Failure` may still appear in some terminal/lost-container cases.
 
 | Status                        | Meaning |
 |-------------------------------|---------|
 | `Failure`                     | Generic failure (used in some recovery/terminal cases) |
-| `UploadFailure`               | Failed to establish upload locations for validator logs or solution output during validation |
+| `UploadFailure`               | Failed to establish upload locations for validator logs or solution output. This reason is reported to the platform |
 | `BuildFailure`                | Docker build failed (bad Dockerfile, missing dependencies, compilation error, etc.) |
 | `RunFailure`                  | The container failed to start, or crashed during execution without producing solution artifacts |
 | `ImageValidationFailure`      | The built image failed post-build checks (e.g. too large, missing required labels) |

@@ -31,6 +31,12 @@ CROSS_CHECK_MAX_BATCH_SIZE: int = 3
 # is not reported as Running for minutes.
 SOLUTION_CONTAINER_MANAGER_TIMEOUT: timedelta = timedelta(seconds=30)
 
+# Inline gaps before repeating a verify PATCH that did not land, then a
+# once-a-minute retry on the container-manager timer until the window ends.
+VERIFY_REPORT_RETRY_DELAYS_S: tuple[int, ...] = (1, 2, 4)
+VERIFY_REPORT_RETRY_INTERVAL: timedelta = timedelta(seconds=60)
+VERIFY_REPORT_RETRY_WINDOW: timedelta = timedelta(minutes=15)
+
 MAX_SOLUTIONS: int = 1
 
 # --- Docker resource pruning ---

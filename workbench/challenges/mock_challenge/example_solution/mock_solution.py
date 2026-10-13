@@ -65,6 +65,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 SOLUTION_OUTPUT_SEPARATOR = (
     b"\n----- ENIGMA-SOLUTION-OUTPUT-BEGIN-a8c7f3e2-9d4b-4c5a-8f1e-2b6d3a4e5f7c -----\n"
 )
+SOLUTION_OUTPUT_END_SEPARATOR = (
+    b"\n----- ENIGMA-SOLUTION-OUTPUT-END-a8c7f3e2-9d4b-4c5a-8f1e-2b6d3a4e5f7c -----\n"
+)
 
 # Hex-encoded 32-byte Ed25519 private seed; pairs with ``ENIGMA_MOCK_PUBLIC_KEY`` in
 # ``qbittensor.validator.solution.solution_validations.mock_solution`` (mock / staging only).
@@ -123,7 +126,7 @@ def _write_solution_output(zip_bytes: bytes) -> None:
     stdout_buffer = sys.stdout.buffer
     stdout_buffer.write(SOLUTION_OUTPUT_SEPARATOR)
     stdout_buffer.write(encoded)
-    stdout_buffer.write(b"\n")
+    stdout_buffer.write(SOLUTION_OUTPUT_END_SEPARATOR)
     stdout_buffer.flush()
 
 

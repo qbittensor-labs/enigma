@@ -158,9 +158,19 @@ enigma-workbench samples --difficulty 1
 
 A working reference implementation using [Qiskit Aer](https://qiskit.github.io/qiskit-aer/)
 is provided in `example_solution/`. It uses statevector simulation for small
-circuits and MPS (matrix product state) for larger ones. This is a starting
-point — production circuits at higher difficulties will require more
-sophisticated simulation techniques or hardware acceleration.
+circuits and MPS (matrix product state) for larger ones.
+
+**This example is the original baseline — deliberately trivial, and nowhere near
+the frontier.** Production circuits at higher difficulties are solved by far more
+sophisticated solvers than the plain statevector/MPS simulation used here. Every
+winning submission is open-sourced under AGPL-3.0 and archived, level by level,
+here:
+
+**→ [github.com/qbittensor-labs/hqp-solutions](https://github.com/qbittensor-labs/hqp-solutions)**
+
+If you're serious about competing, start from the current frontier in that repo
+rather than from this example — Enigma open-sources each winning solution so the
+next competitor can build on it.
 
 ## Testing
 
