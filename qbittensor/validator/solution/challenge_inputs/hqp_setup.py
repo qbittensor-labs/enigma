@@ -37,6 +37,7 @@ def hqp_setup(
     platform_client: "object | None" = None,
     milestone_id: str | None = None,
     challenge_id: str | None = None,
+    submission_id: str | None = None,
 ) -> str:
     """Fetch an HQP circuit from the platform and write it to the mount directory.
 
@@ -44,7 +45,7 @@ def hqp_setup(
     A fallback to configuration["milestone_id"] is kept only for direct/test calls.
 
     The actual download is performed exclusively by calling
-    platform_client.get_milestone_metadata(milestone_id) using the authenticated
+    platform_client.get_milestone_metadata(milestone_id, submission_id=...) using the authenticated
     client (validator JWT + client mapping).
 
     The returned metadata contains the circuit QASM ("circuit") and the secret
@@ -88,7 +89,9 @@ def hqp_setup(
         )
 
     try:
-        metadata = platform_client.get_milestone_metadata(mid)
+        metadata = platform_client.get_milestone_metadata(
+            mid, submission_id=submission_id
+        )
     except Exception as e:
         bt.logging.critical(f"Failed to download HQP metadata via authenticated client: {e}")
         raise RuntimeError(f"Failed to download HQP metadata: {e}") from e

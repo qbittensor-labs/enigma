@@ -216,7 +216,9 @@ class ChallengesClient:
             )
         return {}
 
-    def get_milestone_metadata(self, milestone_id: str) -> dict:
+    def get_milestone_metadata(
+        self, milestone_id: str, submission_id: Optional[str] = None
+    ) -> dict:
         """
         Fetch a metadata record for this validator for the milestone.
         Requires an authenticated client (validator JWT).
@@ -225,9 +227,11 @@ class ChallengesClient:
             raise RuntimeError(
                 "get_milestone_metadata requires an authenticated ChallengesClient (validator credentials)"
             )
+        params = {"submission_id": submission_id} if submission_id else None
         resp = self._request(
             "get",
             f"v1/challenges/milestones/{milestone_id}/metadata",
+            params=params,
             operation="get_milestone_metadata",
         )
         return resp.json()

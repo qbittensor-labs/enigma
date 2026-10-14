@@ -34,7 +34,8 @@ class MilestoneHandlers:
 
     Setup signature:
         (solution_folder_path: str, configuration: dict, *, platform_client=None,
-         milestone_id: str | None = None, challenge_id: str | None = None) -> str
+         milestone_id: str | None = None, challenge_id: str | None = None,
+         submission_id: str | None = None) -> str
 
     Validate signature:
         (solution_folder_path: str) -> tuple[bool, str | None]
