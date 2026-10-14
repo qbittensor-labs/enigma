@@ -43,6 +43,7 @@ def breaking_rsa_setup(
     platform_client: "object | None" = None,
     milestone_id: str | None = None,
     challenge_id: str | None = None,
+    submission_id: str | None = None,
 ) -> str:
     """Generate a Breaking RSA challenge and write it to the mount directory.
 

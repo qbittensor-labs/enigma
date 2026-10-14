@@ -28,6 +28,7 @@ def mock_solution_setup(
     platform_client: "object | None" = None,
     milestone_id: str | None = None,
     challenge_id: str | None = None,
+    submission_id: str | None = None,
 ) -> str:
 
     try:

@@ -293,6 +293,7 @@ def run_solution_management(
             configuration=milestone_configuration,
             platform_client=platform_client,
             milestone_id=challenge_milestone_id,
+            submission_id=submission_id,
         )
 
         # Run the image in a container, capture the container id

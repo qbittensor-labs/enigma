@@ -29,6 +29,7 @@ def run_challenge_setup(
     configuration: dict | None = None,
     platform_client: ChallengesClient | None = None,
     milestone_id: str | None = None,
+    submission_id: str | None = None,
 ) -> str:
     """Run the input setup logic for a given challenge.
 
@@ -58,4 +59,5 @@ def run_challenge_setup(
         platform_client=platform_client,
         milestone_id=milestone_id,
         challenge_id=challenge_id,
+        submission_id=submission_id,
     )
