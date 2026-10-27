@@ -284,7 +284,7 @@ class DBQueryMiner(BaseDBQuery):
                         MinerSubmissionStatus.validator_hotkey == validator_hotkey,
                         MinerSubmissionStatus.solution_status != MINER_SUBMISSION_STATUS_SUBMITTED,
                     )
-                    .subquery()
+                    .scalar_subquery()
                 )
 
                 return (

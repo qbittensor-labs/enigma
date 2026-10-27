@@ -19,6 +19,8 @@ import bittensor as bt
 import urllib.request
 from typing import Optional
 
+from qbittensor.utils.neuron_liveness import touch_neuron_progress
+
 
 def download_zip(url: str, folder_name: str) -> Optional[str]:
     """Download the vip file from the url. Validate that the file type is .zip
@@ -33,6 +35,7 @@ def download_zip(url: str, folder_name: str) -> Optional[str]:
     """
     bt.logging.info("📥 Downloading .zip file")
     bt.logging.info(f"Downloading zip from URL: {url}")
+    touch_neuron_progress()
     try:
         local_filename, _ = urllib.request.urlretrieve(url, filename=f"{folder_name}/solution.zip")
         bt.logging.info(f"\t✅ File downloaded to '{local_filename}'")

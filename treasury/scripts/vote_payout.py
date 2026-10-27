@@ -27,7 +27,7 @@ import sys
 import os
 import requests
 
-from utils.common import parse_oz_custom_error, DEFAULT_RPC_URL
+from utils.common import parse_oz_custom_error, DEFAULT_RPC_URL, resolve_payout_coldkey
 try:
     from async_substrate_interface.sync_substrate import SubstrateInterface
     from bittensor.wallet import Keypair
@@ -190,17 +190,23 @@ def main():
             print(f"❌ Milestone {milestone_id} does not have a solved_address set.")
             sys.exit(1)
 
-    # Look up coldkey
-    print(f"🔍 Looking up coldkey for hotkey: {solved_address}")
+    # Winner address is a hotkey, or a coldkey (preparation payout address).
+    # Owner maps a registered hotkey to its coldkey. A coldkey has no entry.
+    print(f"🔍 Looking up coldkey for winner address: {solved_address}")
     substrate = None
     try:
         substrate_url = args.rpc.replace("http://", "ws://").replace("https://", "wss://")
         substrate = SubstrateInterface(url=substrate_url)
         owner = substrate.query("SubtensorModule", "Owner", [solved_address])
-        if not owner.value or owner.value == "5C4hrfjw9DjXZTzV3MwzrrAr9P1MJhSrvWGWqi1eSuyUpnhM":
-            print(f"❌ Could not find owner (coldkey) for hotkey {solved_address} on chain.")
-            sys.exit(1)
-        miner_coldkey = "0x" + Keypair(ss58_address=owner.value).public_key.hex()
+        owner_ss58 = owner.value if owner is not None else None
+        miner_coldkey_ss58, resolved_from_hotkey = resolve_payout_coldkey(
+            solved_address, owner_ss58
+        )
+        miner_coldkey = "0x" + Keypair(ss58_address=miner_coldkey_ss58).public_key.hex()
+        if resolved_from_hotkey:
+            print(f"   Found Coldkey: {miner_coldkey_ss58}")
+        else:
+            print(f"   No hotkey registration for {solved_address}. Using it as the coldkey.")
     except Exception as e:
         print(f"❌ Error querying chain for coldkey: {e}")
         sys.exit(1)
