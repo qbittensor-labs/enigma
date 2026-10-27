@@ -27,6 +27,7 @@ from qbittensor.validator.solution.constants import (
 )
 from qbittensor.validator.solution.exceptions.invalid_solution import InvalidSolutionError
 from qbittensor.utils.solution_status import ValidationFailureReason
+from qbittensor.utils.neuron_liveness import touch_neuron_progress
 from .docker_ops import DockerOps
 
 
@@ -97,6 +98,9 @@ def build_image(image_name: str, dockerfile_dir: str = ".", build_log_path: Opti
         try:
             assert proc.stdout is not None
             for line in proc.stdout:
+                # A build runs on the neuron thread. Touch liveness per line so
+                # a long compile is not treated as a wedged chain read.
+                touch_neuron_progress()
                 # Keep raw line (without forcing strip so we preserve structure)
                 stripped = line.rstrip("\n\r")
                 build_output_lines.append(line)  # keep original newlines for file

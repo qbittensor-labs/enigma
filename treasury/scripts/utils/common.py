@@ -86,6 +86,28 @@ def setup_web3_with_account(args):
         sys.exit(1)
 
 
+# SS58 of the all-zero AccountId. SubtensorModule.Owner returns this default
+# when the queried address is not a registered hotkey.
+ZERO_ACCOUNT_SS58 = "5C4hrfjw9DjXZTzV3MwzrrAr9P1MJhSrvWGWqi1eSuyUpnhM"
+
+
+def resolve_payout_coldkey(solved_address, owner_ss58):
+    """Pick the coldkey that should receive a milestone payout.
+
+    ``solved_address`` is usually the winner hotkey, and ``owner_ss58`` is the
+    ``SubtensorModule.Owner`` value for that hotkey. A preparation payout
+    address can be a coldkey with no hotkey registration. Owner then returns
+    ``None`` or the zero account, and the address itself is the coldkey.
+
+    Returns ``(coldkey_ss58, resolved_from_hotkey)``.
+    """
+    if not solved_address or solved_address == ZERO_ACCOUNT_SS58:
+        raise ValueError(f"Invalid winner address: {solved_address}")
+    if owner_ss58 and owner_ss58 != ZERO_ACCOUNT_SS58:
+        return owner_ss58, True
+    return solved_address, False
+
+
 def parse_oz_custom_error(err_out: str) -> str:
     """Extracts and formats known OpenZeppelin custom errors from cast output."""
     reason = err_out.split("revert ")[-1].split(", data:")[0].strip() if "revert " in err_out else err_out

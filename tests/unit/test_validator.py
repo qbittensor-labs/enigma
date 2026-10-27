@@ -15,7 +15,9 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, PropertyMock, patch
+
+import time
 
 import numpy as np
 import pytest
@@ -879,6 +881,41 @@ class TestShouldSetWeights:
 
         assert mock_validator._last_emitted_recipient == old
         assert mock_validator._last_submit_attempt_block == 720
+
+
+class TestMetagraphSyncInterval:
+    def test_should_sync_follows_epoch_not_chain_last_update(self, mock_validator):
+        mock_validator.metagraph.last_update[mock_validator.uid] = 0
+        mock_validator._last_metagraph_sync_block = 1000
+        with patch.object(Validator, "block", new_callable=PropertyMock, create=True) as block:
+            block.return_value = 1099
+            assert mock_validator.should_sync_metagraph() is False
+            block.return_value = 1100
+            assert mock_validator.should_sync_metagraph() is True
+
+    def test_timeout_backoff_skips_sync(self, mock_validator):
+        mock_validator._metagraph_sync_not_before = time.monotonic() + 100
+        assert mock_validator.should_sync_metagraph() is False
+
+    def test_sync_opens_a_new_subtensor_after_timeout(self, mock_validator):
+        # The fixture replaces the instance method so other tests can ignore sync.
+        fresh = Mock()
+        mock_validator._last_metagraph_sync_block = 10
+        mock_validator.response_processor = Mock()
+        mock_validator.cross_check = Mock()
+        from qbittensor.base.neuron import BaseNeuron
+        with (
+            patch.object(BaseNeuron, "sync", side_effect=TimeoutError("hung")),
+            patch("neurons.validator.bt.Subtensor", return_value=fresh),
+        ):
+            with pytest.raises(TimeoutError):
+                Validator.sync(mock_validator)
+        assert mock_validator.subtensor is fresh
+        assert mock_validator.metagraph.subtensor is fresh
+        assert mock_validator.response_processor.subtensor is fresh
+        assert mock_validator.cross_check.subtensor is fresh
+        assert mock_validator._last_metagraph_sync_block == 10
+        assert mock_validator._metagraph_sync_not_before > time.monotonic()
 
 
 class TestResyncAndScores:

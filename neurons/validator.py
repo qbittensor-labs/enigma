@@ -27,6 +27,11 @@ import numpy as np
 
 from qbittensor.utils.services.telemetry import TelemetryService
 from qbittensor.utils.env import get_api_config
+from qbittensor.utils.neuron_liveness import (
+    NEURON_STALL_EXIT_S,
+    neuron_progress_is_stale,
+    touch_neuron_progress,
+)
 
 _api_cfg = get_api_config()
 
@@ -265,6 +270,7 @@ class Validator(BaseValidatorNeuron):
         has been moved to the canonical set_weights() override. The base class sync()
         (called after forward in the run loop) now owns the decision of when to set weights.
         """
+        touch_neuron_progress()
         bt.logging.info("⏩ Running forward pass")
 
         # Check timers (these must tick on the forward cadence)
@@ -529,6 +535,66 @@ class Validator(BaseValidatorNeuron):
             from_jwt=from_jwt,
         )
 
+    def should_sync_metagraph(self) -> bool:
+        """Resync once per epoch, not on every forward.
+
+        The base check stays true whenever chain last_update[uid] is older
+        than epoch_length. This validator usually skips set_weights, so that
+        stamp never moves and every step did a full metagraph read. One wedged
+        read then blocked the heartbeat for the life of the process.
+        """
+        not_before = getattr(self, "_metagraph_sync_not_before", None)
+        if not_before is not None and time.monotonic() < not_before:
+            self._metagraph_sync_due = False
+            return False
+        last = getattr(self, "_last_metagraph_sync_block", None)
+        if last is None:
+            self._metagraph_sync_due = True
+            return True
+        try:
+            elapsed = int(self.block) - int(last)
+            due = elapsed >= int(self.config.neuron.epoch_length)
+        except Exception as exc:
+            bt.logging.warning(f"Metagraph sync interval check failed ({exc}); syncing")
+            due = True
+        self._metagraph_sync_due = due
+        return due
+
+    def sync(self) -> None:
+        touch_neuron_progress()
+        try:
+            super().sync()
+        except TimeoutError as exc:
+            bt.logging.error(f"Chain sync timed out: {exc}")
+            self._replace_subtensor()
+            # The blocked read is still inside the old client. Retrying every
+            # step would open another client each time, so wait one epoch.
+            epoch_s = max(60, int(getattr(self.config.neuron, "epoch_length", 100)) * 12)
+            self._metagraph_sync_not_before = time.monotonic() + epoch_s
+            raise
+        if getattr(self, "_metagraph_sync_due", False):
+            self._metagraph_sync_not_before = None
+            try:
+                self._last_metagraph_sync_block = int(self.block)
+            except Exception as exc:
+                bt.logging.warning(f"Could not record metagraph sync block: {exc}")
+
+    def _replace_subtensor(self) -> None:
+        """Drop a wedged chain client. The timed-out read is still blocked in it."""
+        from qbittensor.base.neuron import _network_from_config
+
+        network = _network_from_config(self.config)
+        bt.logging.warning(f"Opening a new subtensor connection ({network})")
+        fresh = bt.Subtensor(network=network)
+        self.subtensor = fresh
+        metagraph = getattr(self, "metagraph", None)
+        if metagraph is not None:
+            metagraph.subtensor = fresh
+        for owner_name in ("response_processor", "cross_check"):
+            owner = getattr(self, owner_name, None)
+            if owner is not None and hasattr(owner, "subtensor"):
+                owner.subtensor = fresh
+
     def should_set_weights(self) -> bool:
         """Emit while the JWT/cap recipient differs from the last successful emit.
 
@@ -709,7 +775,19 @@ class Validator(BaseValidatorNeuron):
 # The main function parses the configuration and runs the validator.
 if __name__ == "__main__":
     with Validator() as validator:
+        touch_neuron_progress()
         while validator.is_running and validator.thread and validator.thread.is_alive():
             bt.logging.info("Validator running... {}".format(time.time()))
+            if neuron_progress_is_stale(NEURON_STALL_EXIT_S):
+                bt.logging.error(
+                    "Neuron thread has not progressed for "
+                    f"{NEURON_STALL_EXIT_S:.0f}s (last work was a chain read or "
+                    "forward pass). Exiting so neuron-ops can restart the process."
+                )
+                # os._exit skips threads blocked in the chain client. The
+                # neuron thread is a daemon; a normal return would join it and
+                # wait out the same hang. neuron-ops-run is the systemd main
+                # process (Restart=no); the supervisor restarts a non-zero exit.
+                os._exit(1)
             time.sleep(5)
         bt.logging.warning("Validator background thread has stopped. Exiting.")
