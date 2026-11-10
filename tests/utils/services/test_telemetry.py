@@ -16,6 +16,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 import queue
+import time
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -101,6 +102,149 @@ class TestTelemetryServiceFlushBatch:
         assert call_kwargs["json"]["datapoints"][0]["string_value"] == "1.2.3"
         assert call_kwargs["json"]["datapoints"][0]["type"] == "heartbeat_version"
         assert call_kwargs.get("additional_headers") is not None
+
+
+def _ok_response():
+    response = Mock()
+    response.status_code = 200
+    return response
+
+
+def _stop_worker(service: TelemetryService) -> None:
+    service._stop_event.set()
+    if service._worker_thread is not None:
+        service._worker_thread.join(timeout=2)
+
+
+class TestTelemetryServiceDrain:
+    def test_default_batch_is_capped_for_the_parser(self, telemetry_service):
+        assert telemetry_service.batch_size == 40
+        assert telemetry_service.max_batch_bytes == 80 * 1024
+
+    def test_window_posts_points_that_arrive_together(self, telemetry_service):
+        telemetry_service.flush_interval = 0.3
+        telemetry_service.batch_size = 40
+        telemetry_service.request_manager.post = Mock(return_value=_ok_response())
+        telemetry_service._start_background_worker()
+        try:
+            for i in range(3):
+                assert telemetry_service._enqueue_datapoint(
+                    "cpu_usage", "2026-01-01T00:00:00Z", float(i)
+                )
+                time.sleep(0.05)
+            deadline = time.time() + 2
+            while telemetry_service.request_manager.post.call_count == 0 and time.time() < deadline:
+                time.sleep(0.05)
+            time.sleep(0.4)
+        finally:
+            _stop_worker(telemetry_service)
+
+        assert telemetry_service.request_manager.post.call_count == 1
+        points = telemetry_service.request_manager.post.call_args.kwargs["json"]["datapoints"]
+        assert [point["numeric_value"] for point in points] == [0.0, 1.0, 2.0]
+        assert points[0]["type"] == "cpu_usage"
+
+    def test_capped_remainder_posts_without_another_interval(self, telemetry_service):
+        telemetry_service.flush_interval = 2
+        telemetry_service.batch_size = 2
+        telemetry_service.request_manager.post = Mock(return_value=_ok_response())
+        for i in range(5):
+            telemetry_service._enqueue_datapoint("cpu_usage", "2026-01-01T00:00:00Z", float(i))
+        telemetry_service._start_background_worker()
+        try:
+            deadline = time.time() + 1.5
+            while telemetry_service.request_manager.post.call_count < 3 and time.time() < deadline:
+                time.sleep(0.02)
+        finally:
+            _stop_worker(telemetry_service)
+
+        assert telemetry_service.request_manager.post.call_count == 3
+        sizes = [
+            len(call.kwargs["json"]["datapoints"])
+            for call in telemetry_service.request_manager.post.call_args_list
+        ]
+        assert sizes == [2, 2, 1]
+
+    def test_byte_cap_holds_the_point_that_would_cross_it(self, telemetry_service):
+        def item(text: str) -> dict:
+            return {
+                "type": "solution_terminal_finalized",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "value": text,
+                "miner_uid": None,
+                "miner_hotkey": None,
+                "attributes": None,
+            }
+
+        points = [item("r" * 80), item("s" * 80), item("t" * 80)]
+        two = telemetry_service._body_size(points[:2])
+        assert telemetry_service._body_size(points) > two
+        telemetry_service.max_batch_bytes = two
+        telemetry_service.flush_interval = 0.05
+        telemetry_service.batch_size = 40
+        for point in points:
+            telemetry_service.queue.put(point)
+
+        batch, hit_cap = telemetry_service._drain_once(fill_window=True)
+        assert hit_cap is True
+        assert len(batch) == 2
+        assert telemetry_service._body_size(batch) <= two
+        assert telemetry_service._held_item["value"] == points[2]["value"]
+
+        nxt, _hit = telemetry_service._drain_once(fill_window=False)
+        assert [point["value"] for point in nxt] == [points[2]["value"]]
+        assert telemetry_service._held_item is None
+
+    def test_single_oversized_point_is_sent_alone(self, telemetry_service):
+        huge = {
+            "type": "solution_terminal_finalized",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "value": "z" * 400,
+            "miner_uid": None,
+            "miner_hotkey": None,
+            "attributes": None,
+        }
+        telemetry_service.max_batch_bytes = 50
+        assert telemetry_service._body_size([huge]) > 50
+        telemetry_service.queue.put(huge)
+        telemetry_service.queue.put(
+            {
+                "type": "cpu_usage",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "value": 1.0,
+                "miner_uid": None,
+                "miner_hotkey": None,
+                "attributes": None,
+            }
+        )
+        telemetry_service.flush_interval = 0.05
+
+        batch, hit_cap = telemetry_service._drain_once(fill_window=False)
+        assert hit_cap is True
+        assert len(batch) == 1
+        assert batch[0]["value"] == huge["value"]
+        assert telemetry_service._held_item is None
+        assert telemetry_service.queue.qsize() == 1
+
+    def test_queue_full_warns_once_per_interval(self, telemetry_service):
+        telemetry_service.max_queue_size = 1
+        telemetry_service.queue = queue.Queue(maxsize=1)
+        telemetry_service.queue.put_nowait({"type": "x", "timestamp": "t", "value": 1})
+        telemetry_service.flush_interval = 60
+        telemetry_service._last_queue_full_log = 0.0
+        with patch("qbittensor.utils.services.telemetry.bt.logging") as log:
+            assert telemetry_service._enqueue_datapoint("overflow", "2026-01-01T00:00:00Z", 1.0) is False
+            assert telemetry_service._enqueue_datapoint("overflow2", "2026-01-01T00:00:00Z", 1.0) is False
+            telemetry_service.queue = Mock()
+            telemetry_service.queue.full.return_value = False
+            telemetry_service.queue.put_nowait.side_effect = queue.Full
+            assert telemetry_service._enqueue_datapoint("overflow3", "2026-01-01T00:00:00Z", 1.0) is False
+        assert log.warning.call_count == 1
+
+        telemetry_service._last_queue_full_log = time.time() - 61
+        with patch("qbittensor.utils.services.telemetry.bt.logging") as log:
+            assert telemetry_service._enqueue_datapoint("overflow4", "2026-01-01T00:00:00Z", 1.0) is False
+        assert log.warning.call_count == 1
 
 
 class TestCpuGpuLookupHelpers:
