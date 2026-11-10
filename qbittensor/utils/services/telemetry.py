@@ -15,6 +15,7 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+import json
 import time
 import bittensor as bt
 import numpy as np
@@ -40,6 +41,12 @@ try:
 except ImportError:
     NVML_AVAILABLE = False
     bt.logging.warning("pynvml not available, GPU metrics will be skipped")
+
+
+# The telemetry service uses Nest's default JSON parser, about 100kb.
+# Count and byte caps keep one POST under that limit.
+_DEFAULT_BATCH_SIZE = 40
+_MAX_BATCH_BYTES = 80 * 1024
 
 
 def _get_cpu_model() -> str:
@@ -557,7 +564,7 @@ class TelemetryService:
         device: str = "cpu",
         export_interval_millis=5000,
         max_queue_size=1000,
-        batch_size=10,
+        batch_size=_DEFAULT_BATCH_SIZE,
         retry_attempts=3,
         retry_delay=1,
         service_name: Optional[str] = None,
@@ -585,6 +592,7 @@ class TelemetryService:
             raise ValueError("TelemetryService requires keypair + base_url")
         self.max_queue_size = max_queue_size
         self.batch_size = batch_size
+        self.max_batch_bytes = _MAX_BATCH_BYTES
         self.retry_attempts = retry_attempts
         self.retry_delay = retry_delay
         self.flush_interval = export_interval_millis / 1000.0
@@ -594,6 +602,9 @@ class TelemetryService:
         self.queue = queue.Queue(maxsize=max_queue_size)
         self._stop_event = threading.Event()
         self._worker_thread = None
+        # Point that crossed the byte cap. It leads the next batch.
+        self._held_item: Dict[str, Any] | None = None
+        self._last_queue_full_log = 0.0
         self.heartbeat_timer = Timer(timeout=timedelta(minutes=5), run=self.record_heartbeat, run_on_start=True)
         self.system_metrics_timer = Timer(timeout=timedelta(minutes=5), run=self.record_system_metrics, run_on_start=True)
 
@@ -618,49 +629,102 @@ class TelemetryService:
     def _start_background_worker(self):
         """Start the background thread for flushing the queue."""
         def worker():
+            # After a capped batch, drain the backlog before opening a new window.
+            fill_window = True
             while not self._stop_event.is_set():
                 try:
-                    # Flush every interval or when batch_size reached
-                    start_time = time.time()
-                    batch = []
-                    while len(batch) < self.batch_size and not self._stop_event.is_set():
-                        try:
-                            item = self.queue.get(timeout=0.1)
-                            batch.append(item)
-                        except queue.Empty:
-                            break
-                    if batch:
-                        self._flush_batch(batch)
-                    sleep_time = max(0, self.flush_interval - (time.time() - start_time))
-                    if sleep_time > 0:
-                        self._stop_event.wait(sleep_time)
+                    batch, hit_cap = self._drain_once(fill_window=fill_window)
+                    if not batch:
+                        fill_window = True
+                        continue
+                    self._flush_batch(batch)
+                    more = self._held_item is not None or not self.queue.empty()
+                    fill_window = not (hit_cap and more)
                 except Exception as e:
                     bt.logging.error(f"Background worker error: {e}")
                     time.sleep(self.retry_delay)
+                    fill_window = True
 
         self._worker_thread = threading.Thread(target=worker, daemon=True)
         self._worker_thread.start()
 
+    def _queue_get(self, timeout: float) -> Dict[str, Any]:
+        """Get one queued point. A positive timeout also wakes on shutdown."""
+        if timeout <= 0:
+            return self.queue.get_nowait()
+        deadline = time.monotonic() + timeout
+        while not self._stop_event.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise queue.Empty
+            try:
+                return self.queue.get(timeout=min(0.2, remaining))
+            except queue.Empty:
+                continue
+        raise queue.Empty
+
+    def _drain_once(self, *, fill_window: bool) -> tuple[list[Dict[str, Any]], bool]:
+        """Collect one batch.
+
+        With fill_window, block until the first point, then take everything that
+        arrives before the flush interval ends. Without it, take only what is
+        already waiting. Either path stops at the count cap or the byte cap.
+        The point that would cross the byte cap is held for the next batch.
+        One point that is already over the cap is returned alone.
+        """
+        batch: list[Dict[str, Any]] = []
+        first = self._held_item
+        self._held_item = None
+        if first is None:
+            try:
+                first = self._queue_get(self.flush_interval if fill_window else 0)
+            except queue.Empty:
+                return [], False
+        batch.append(first)
+        if self._body_size(batch) > self.max_batch_bytes:
+            return batch, True
+
+        deadline = time.monotonic() + (self.flush_interval if fill_window else 0.0)
+        while len(batch) < self.batch_size and not self._stop_event.is_set():
+            timeout = deadline - time.monotonic() if fill_window else 0.0
+            if fill_window and timeout <= 0:
+                break
+            try:
+                nxt = self._queue_get(timeout)
+            except queue.Empty:
+                break
+            if self._body_size(batch + [nxt]) > self.max_batch_bytes:
+                self._held_item = nxt
+                return batch, True
+            batch.append(nxt)
+        hit_cap = len(batch) >= self.batch_size
+        return batch, hit_cap
+
+    def _format_datapoint(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        payload_item: Dict[str, Any] = {
+            "type": item["type"],
+            "timestamp": item["timestamp"],
+        }
+        if item.get("miner_uid") is not None:
+            payload_item["miner_uid"] = item["miner_uid"]
+        if item.get("miner_hotkey"):
+            payload_item["miner_hotkey"] = item["miner_hotkey"]
+        if isinstance(item["value"], (int, float)):
+            payload_item["numeric_value"] = item["value"]
+        else:
+            payload_item["string_value"] = item["value"]
+        if item.get("attributes"):
+            payload_item["attributes"] = item["attributes"]
+        return payload_item
+
+    def _body_size(self, batch: list[Dict[str, Any]]) -> int:
+        """UTF-8 size of the JSON object RequestManager posts."""
+        payload = {"datapoints": [self._format_datapoint(item) for item in batch]}
+        return len(json.dumps(payload).encode("utf-8"))
+
     def _flush_batch(self, batch: list[Dict[str, Any]]) -> None:
         """Flush a batch of datapoints via the internal RequestManager (single POST to /v1/datapoints)."""
-        # Build the payload once
-        datapoints = []
-        for item in batch:
-            payload_item = {
-                "type": item["type"],
-                "timestamp": item["timestamp"],
-            }
-            if item.get("miner_uid") is not None:
-                payload_item["miner_uid"] = item["miner_uid"]
-            if item.get("miner_hotkey"):
-                payload_item["miner_hotkey"] = item["miner_hotkey"]
-            if isinstance(item["value"], (int, float)):
-                payload_item["numeric_value"] = item["value"]
-            else:
-                payload_item["string_value"] = item["value"]
-            if item.get("attributes"):
-                payload_item["attributes"] = item["attributes"]
-            datapoints.append(payload_item)
+        datapoints = [self._format_datapoint(item) for item in batch]
 
         additional_headers = []
         if self._service_name:
@@ -698,7 +762,7 @@ class TelemetryService:
         # CHANGE: timestamp now str (ISO)
         try:
             if self.queue.full():
-                bt.logging.warning(f"Queue full (size {self.max_queue_size}); dropping datapoint {type}")
+                self._warn_queue_full(type, with_size=True)
                 return False
             # Convert value to ensure it's a Python scalar (handles NumPy/Torch)
             safe_value = self._to_python_scalar(value)
@@ -732,8 +796,21 @@ class TelemetryService:
 
             return True
         except queue.Full:
-            bt.logging.warning(f"Queue full; dropping datapoint {type}")
+            self._warn_queue_full(type, with_size=False)
             return False
+
+    def _warn_queue_full(self, type: str, *, with_size: bool) -> None:
+        """Log a drop at most once per flush interval."""
+        now = time.time()
+        if now - self._last_queue_full_log < self.flush_interval:
+            return
+        self._last_queue_full_log = now
+        if with_size:
+            bt.logging.warning(
+                f"Queue full (size {self.max_queue_size}); dropping datapoint {type}"
+            )
+        else:
+            bt.logging.warning(f"Queue full; dropping datapoint {type}")
 
     def _enqueue_gpu_metric(
         self,
@@ -974,8 +1051,12 @@ class TelemetryService:
             if self._worker_thread:
                 self._worker_thread.join(timeout=5.0)
 
-            # Force flush remaining items
+            # Force flush remaining items, including a point held for the next batch.
             batch = []
+            held = self._held_item
+            self._held_item = None
+            if held is not None:
+                batch.append(held)
             while not self.queue.empty():
                 try:
                     batch.append(self.queue.get_nowait())
